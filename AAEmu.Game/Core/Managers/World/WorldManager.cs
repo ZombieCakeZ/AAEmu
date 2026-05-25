@@ -832,6 +832,37 @@ public class WorldManager(
             return finalHeight;
         }
 
+        // 0a. Aquatic NPCs: clamp Z between terrain floor and water surface so they
+        //     swim in 3D within the water column instead of glitching under the map
+        //     or breaching the surface. Wins over CanFly / Hold / Idle behavior gates
+        //     because aquatic fliers (rays, sharks, fish) are tagged IsAquatic at spawn
+        //     and must stay submerged.
+        if (ai.Owner.IsAquatic)
+        {
+            var terrainHeight = GetHeight(zoneId, x, y, z);
+            var aquaticWorld = GetWorld(ai.Owner.Transform.InstanceId);
+            // Large aquatic NPCs (e.g. Kraken, template 7607) need extra submersion
+            // so they don't visually breach the surface during combat.
+            var submersionDepth = ai.Owner.TemplateId == 7607 ? 20f : 0f;
+            // Kraken: lock to spawn depth when not in combat, only dive deeper when fighting.
+            var minZ = (ai.Owner.TemplateId == 7607 && !ai.Owner.IsInBattle && ai.Owner.Spawner != null)
+                ? ai.Owner.Spawner.Position.Z
+                : terrainHeight;
+            if (aquaticWorld?.Water != null)
+            {
+                var waterSurface = aquaticWorld.Water.GetWaterSurface(new Vector3(x, y, z), out _);
+                var maxZ = waterSurface - submersionDepth;
+                return Math.Max(minZ, Math.Min(z, maxZ));
+            }
+            // Fallback when no water bodies are available: ocean level from world template.
+            if (aquaticWorld != null)
+            {
+                var maxZ = aquaticWorld.Template.OceanLevel - submersionDepth;
+                return Math.Max(minZ, Math.Min(z, maxZ));
+            }
+            return Math.Max(minZ, z);
+        }
+
         // 1. If an NPC can fly, the height is taken from the spawner's position.
         if (ai.Owner.CanFly)
         {
