@@ -873,6 +873,19 @@ public class WorldManager(
             // No grid data here — fall through to terrain.
         }
 
+        // 3b-active. Unbound NPCs walking ON a grid cell follow the grid height too,
+        //   but only if the grid floor is within tolerance of the NPC's current Z.
+        //   Tolerance prevents snapping when an NPC falls past a grid from above
+        //   or roams below a roof grid. NPCs can freely walk onto and off the grid.
+        if (cvMgr.HasGridData(worldName, x, y))
+        {
+            const float activeGridZTolerance = 2.0f;
+            var currentNpcZ = ai.Owner.Transform.Local.Position.Z;
+            var activeGrid = cvMgr.GetGridHeight(worldName, x, y, currentNpcZ);
+            if (activeGrid.HasValue && MathF.Abs(activeGrid.Value - currentNpcZ) <= activeGridZTolerance)
+                return activeGrid.Value;
+        }
+
         // 3c. Generic floor volume lookup (any NPC on a building's collision floor).
         var floorHeight = cvMgr.GetFloorHeight(worldName, x, y, z);
         if (floorHeight.HasValue)

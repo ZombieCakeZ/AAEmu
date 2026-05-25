@@ -1,12 +1,12 @@
 # Collision Volume System
 
-A server-side navigation aid for NPCs that does not require NavMesh or GeoNav data. NPCs use server-authored collision data to navigate around walls, walk on bridges and rooftops, stay inside designated zones, and recover when stuck.
+A server-side navigation aid for NPCs that does not require NavMesh or GeoNav data. NPCs use server-authored collision data to navigate around walls, walk on bridges and rooftops, optionally stay inside designated zones, and recover when stuck.
 
 The system has three building blocks:
 
-- **Wall volumes** block direct movement through a vertical surface.
+- **Wall volumes** block movement through a vertical surface.
 - **Floor volumes** raise the ground reference height (bridges, decks, rooftops, multi-floor buildings).
-- **Height grids** sample terrain into a dense cell grid that NPCs can be bound to so they never leave their authored zone.
+- **Height grids** sample real terrain or walkable surfaces into a dense cell grid. Any NPC walking over a grid follows the grid height automatically; admins can additionally *bind* an NPC template to a grid for strict containment.
 
 All authoring is done in-game with the `/colvol` (or `/cv` for short) admin command. Data is persisted as JSON under the server's volume storage and loaded automatically at server start.
 
@@ -17,7 +17,7 @@ All authoring is done in-game with the `/colvol` (or `/cv` for short) admin comm
 1. Log in with a GM account.
 2. Walk to the spot you want to author.
 3. Run a `/cv` sub-command for the volume type you want to create.
-4. Restart the server (or `/cv reload`) for changes to take effect for newly spawned NPCs.
+4. Restart the server (or `/cv reload`) so newly spawned NPCs pick up the data.
 
 Help text is always available with `/cv` (no args).
 
@@ -31,7 +31,7 @@ A wall is a vertical surface defined by a polyline of corners and a height. NPCs
 ```
 /cv wall start [height] [name]
 ```
-Then walk along the wall and run `/cv corner` at each vertex. End with `/cv wall finish`.
+Walk along the wall and run `/cv corner` at each vertex. End with `/cv wall finish`.
 
 - `height` defaults to a sensible building wall height.
 - `/cv undo` removes the last placed corner.
@@ -48,9 +48,11 @@ Walk along the wall. The server samples your position; when you call `/cv wall s
 - `/cv wall scan cancel` aborts.
 
 ### Wall behavior
-- NPCs check both the direct movement vector and two offset rays (body buffer ~0.3m) to prevent corner-clipping.
+- NPCs check the direct movement vector AND two offset rays (body buffer ~0.3m) to prevent corner-clipping.
 - A blocked NPC immediately attempts to repath around the wall using server-side A* over wall volumes (`FindWallPath`).
-- If the NPC is stuck against a wall for 3 seconds, it gains 5 seconds of damage immunity and buff `7376` is applied. This prevents player exploits where NPCs are kited against geometry and burst down while immobile.
+- In combat, `BaseCombatBehavior` pre-computes the A* path **before** the NPC walks into the wall, so chasing through buildings looks natural rather than "bump and recover".
+- Random roaming (`AiUtils.CalcNextRoamingPosition`) rejects any destination that would require crossing a wall.
+- If an NPC is stuck against a wall (or trapped by a height gap) for **3 seconds**, it gains **5 seconds of damage immunity** and buff `7376` is applied. This prevents player exploits where NPCs are kited against geometry and burst down while immobile.
 
 ---
 
@@ -77,14 +79,15 @@ Walk the perimeter back to your starting point. `/cv floor scan finish` builds t
 Drops an axis-aligned box volume at your position. Quick for square rooms or simple platforms.
 
 ### Floor behavior
-- `GetReferenceHeight` queries CV floors first; if none match, falls back to the heightmap.
-- A floor lifts the NPC's Z up to that floor's surface for as long as it stays inside the polygon.
+- `GetReferenceHeight` queries CV floors (and grids — see below); falls back to the heightmap if nothing matches.
+- A floor lifts the NPC's Z to that floor's surface for as long as it stays inside the polygon.
+- Grid-bound NPCs use Floor volumes as designated exits when they need to leave their grid.
 
 ---
 
 ## Height grids
 
-A height grid is a dense cell grid (typically 1–4m per cell) that samples real terrain or walkable surfaces around a center point. NPCs can be **grid-bound** so they can only move on cells that exist in the grid. Leaving a bound grid requires walking through a Floor volume (the "exit" rule).
+A height grid is a dense cell grid (typically 1–4m per cell) that samples real terrain or walkable surfaces around a center point.
 
 ### Author a grid
 ```
@@ -113,42 +116,38 @@ Cancel:
 /cv grid delete <name>
 ```
 
-### Binding NPCs to grids
-There are two binding levels.
+### How NPCs interact with a grid
 
-**Template-level (persistent, all spawns of this NPC):**
+There are two modes:
+
+#### 1. Auto-prefer (default, no binding needed)
+
+Any NPC walking over a cell that has grid data will follow the grid's Z instead of the heightmap — **but only if the grid height is within 2m of the NPC's current Z**. This tolerance prevents an NPC falling past a roof grid from suddenly snapping onto it.
+
+What this gives you:
+- Walk a grid over a hilltop fort: NPCs roam normally on the surrounding terrain, but when they step onto the fort they follow the authored Z (no clipping, no floating).
+- NPCs can freely walk on AND off the grid. No exit volume needed.
+- Zero authoring overhead per NPC: just walk the grid and reload.
+
+Implementation: `WorldManager.GetReferenceHeight` block `3b-active`, calling `CollisionVolumeManager.HasGridData` + `GetGridHeight`.
+
+#### 2. Strict bind (opt-in, prevents leaving the grid)
+
+For special cases — rooftop guards, balcony NPCs, NPCs that should never wander off a structure — bind the NPC template to a specific grid. Bound NPCs can only leave the grid by walking through a Floor volume (the designated exit).
+
 ```
-/cv gridbind <npcId> [gridName]
-/cv gridunbind <npcId> [gridName]
+/cv gridbind <npcTemplateId> [gridName]
+/cv gridunbind <npcTemplateId> [gridName]
 ```
-- Without `gridName`, the wildcard `*` binding is added: the NPC is restricted to *any* grid that covers its spawn point.
+
+- Without `gridName`: wildcard `*` binding — the NPC is restricted to *any* grid that covers its position.
 - Call `gridbind` multiple times to bind to multiple specific grids.
-
-**Instance-level (in-memory, this one spawn only):**
-Set automatically at spawn — see "Auto-bind at spawn" below.
-
-### Grid behavior
-- NPCs use the cell's stored Z (not the heightmap) when standing on a grid cell.
-- Movement to a cell that does not exist in the grid is blocked (`IsGridBoundNpcBlocked`).
-- A grid-bound NPC can only leave its grid through a Floor volume (so you can author a designated exit).
+- Bound NPCs are blocked from moving onto cells outside their grids (`IsGridBoundNpcBlocked`).
 
 ### Inspect bindings
 ```
-/cv bindings    # lists all NPC template bindings (volume + grid)
+/cv bindings    # lists all template-level NPC bindings (volume + grid)
 ```
-
----
-
-## Auto-bind at spawn
-
-When `NpcSpawnerNpc` spawns an NPC, the server now:
-
-1. Determines if the NPC is **aquatic** (see below).
-2. For non-aquatic, non-flying NPCs, looks up template-level grid bindings.
-3. If the NPC has bindings, probes the matching grid at the spawn position.
-4. If a grid covers the spawn position, the NPC is bound to that grid for its lifetime, and its spawn Z is snapped to the grid's cell height.
-
-Use `/cv gridbind <npcId> *` to opt every spawn of an NPC template into auto-binding to whichever grid covers it.
 
 ---
 
@@ -156,7 +155,7 @@ Use `/cv gridbind <npcId> *` to opt every spawn of an NPC template into auto-bin
 
 Aquatic NPCs (fish, sharks, rays) need 3D movement in water and must not walk on land.
 
-At spawn, an NPC is flagged `IsAquatic` if:
+At spawn an NPC is flagged `IsAquatic` if:
 
 - It has `CanFly` (movement id 2) and spawns inside water, **or**
 - It is a normal NPC that spawns more than 10m below the water surface (the depth check prevents false-tagging beach NPCs whose feet touch shallow water).
@@ -166,7 +165,7 @@ Effects:
 - `MoveTowards` blocks aquatic NPCs from moving onto land.
 - Non-aquatic NPCs use their current Z as the height reference, which prevents Z-drop bugs near multi-floor geometry.
 
-No authoring is required — detection runs from the world's water data.
+No authoring required — detection runs from the world's water data.
 
 ---
 
@@ -184,12 +183,50 @@ This stops players from kiting NPCs into geometry corners and burning them down 
 
 ---
 
+## AI integration
+
+CV awareness is wired into the AI layer at two points:
+
+### Random roaming — `AiUtils.CalcNextRoamingPosition`
+When an NPC picks its next idle wander target it now:
+- Rejects targets that would require crossing a wall volume (uses `IsBlockedByWall`).
+- For grid-bound NPCs, rejects targets outside the bound grid that aren't reachable through a Floor exit (uses `IsGridBoundNpcBlocked`).
+- For aquatic NPCs, rejects targets on land.
+
+If none of the random samples is valid, the NPC stays at its idle position for that tick.
+
+### Combat chase — `BaseCombatBehavior.MoveInRange`
+When chasing a target it now:
+- Detects a direct line-of-sight block via `IsBlockedByWall`.
+- Pre-computes an A* path around walls (`FindWallPath`) and stores it on the NPC's `_wallPath` so the next `MoveTowards` tick already follows waypoints.
+- Clears `IsWallStuck`, `CombatEvadeImmuneUntil`, the wall path, and buff `7376` when the NPC reaches attack range.
+
+This makes combat-chase look smooth — the NPC routes around the obstacle in one move instead of bumping into it first.
+
+---
+
 ## ReturnState integration
 
 When an NPC enters `ReturnState` (leashes back to spawn):
 - Wall path data is cleared.
 - `WallBlockedTicks`, `IsWallStuck`, `CombatEvadeImmuneUntil`, buff `7376` are all reset.
 - On `OnCompletedReturn`, the NPC is hard-teleported to its spawn via `Transform.Local.SetPosition(...)` (bypasses wall collision so a stuck NPC always recovers).
+
+---
+
+## Data layout on disk
+
+All CV data lives under `<Server-Bin>/Data/CollisionVolumes/`. The directory is created automatically on first server start if it doesn't exist.
+
+| File pattern | Contents |
+|---|---|
+| `<worldName>.json` (e.g. `main_world.json`) | Walls, Floors, Boxes for that world |
+| `pak_*.json` (e.g. `pak_buildings.json`) | Optional extra volume files; merged into the same world at load |
+| `heightgrid_<gridName>.json` | Output of `/cv grid finish` |
+| `npc_bindings.json` | Template-level NPC volume bindings (`/cv bind`) |
+| `npc_grid_bindings.json` | Template-level NPC grid bindings (`/cv gridbind`) |
+
+Files matching `*.bak`, or starting with `npc_bindings` / `npc_grid_bindings` / `heightgrid_`, are skipped by the world-volume loader and handled by their own load paths.
 
 ---
 
@@ -203,11 +240,11 @@ A `CollisionMesh` data type exists for API parity with downstream forks but **no
 
 This system intentionally does not bundle NavMesh or GeoNav (Recast/Detour). Consequences:
 
-- **Cliffs** are not auto-detected. Author a wall or constrain via a grid where you want to forbid drops.
-- **Off-mesh boundaries** rely on grid bindings. NPCs without a grid binding can walk anywhere the heightmap allows.
-- **Open terrain** uses the heightmap exactly like before — wall recovery and immunity still work.
+- **Cliffs** are not auto-detected. Author a wall, or constrain via a strict grid binding, where you want to forbid drops.
+- **Off-mesh boundaries** rely on grid bindings (strict mode). Unbound NPCs can walk anywhere the heightmap allows.
+- **Open terrain** uses the heightmap exactly like before — wall recovery, grid-prefer, and immunity all still work.
 
-In practice: bound your important NPC spawn areas with `/cv grid` and add `/cv wall` for hard obstacles. That covers the same scenarios NavMesh would handle, with the advantage that the data is authored in-game and version-controlled as JSON.
+In practice: walk a grid over your important NPC areas with `/cv grid` and add `/cv wall` for hard obstacles. The auto-prefer grid logic gives you the "NPCs follow the authored surface" benefit without per-template setup. Use strict `/cv gridbind` only when you actually want NPCs locked to a zone.
 
 ---
 
@@ -227,8 +264,8 @@ In practice: bound your important NPC spawn areas with `/cv grid` and add `/cv w
 | `/cv grid start [cell] [radius] [name]` | Author a height grid |
 | `/cv grid show [r] [name]` | Visualize a grid |
 | `/cv grid list` / `status` / `clear` / `delete` | Manage grids |
-| `/cv gridbind <npcId> [name]` | Bind NPC template to grid (use `*` for any) |
-| `/cv gridunbind <npcId> [name]` | Remove grid binding |
+| `/cv gridbind <npcId> [name]` | **Strict** bind: lock NPC template to grid (use `*` for any) |
+| `/cv gridunbind <npcId> [name]` | Remove strict grid binding |
 | `/cv bind <npcId> <volId,...>` | Bind NPC template to volumes |
 | `/cv unbind <npcId>` | Remove volume binding |
 | `/cv bindings` | List all bindings |
