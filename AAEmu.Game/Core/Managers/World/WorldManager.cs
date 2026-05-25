@@ -848,14 +848,44 @@ public class WorldManager(
                 return finalHeight;
         }
 
-        // 3. Terrain height retrieval
+        // 3. Consult CollisionVolumeManager first — bound NPCs get exclusive volume heights,
+        //    grid-bound NPCs prefer grid/volume height over terrain, and any active Floor
+        //    volume at this position takes precedence over the heightmap (handles buildings).
+        var cvMgr = CollisionVolumeManager.Instance;
+        var worldName = CollisionVolumeManager.GetWorldNameFromId(GetWorldIdByZoneKey(zoneId));
+
+        // 3a. NPCs explicitly bound to specific volumes use ONLY those (ignore terrain).
+        var binding = cvMgr.GetNpcBinding(ai.Owner.TemplateId);
+        if (binding != null && binding.Count > 0)
+        {
+            var boundHeight = cvMgr.GetBoundFloorHeight(worldName, x, y, z, binding);
+            if (boundHeight.HasValue)
+                return boundHeight.Value;
+            // Bound NPC outside its volumes — fall through to terrain to avoid hovering.
+        }
+
+        // 3b. Grid-bound NPCs (instance- or template-level) prefer grid/volume height.
+        if (cvMgr.IsNpcBoundToAnyGrid(ai.Owner.ObjId, ai.Owner.TemplateId))
+        {
+            var gridHeight = cvMgr.GetGridHeightForNpc(ai.Owner.ObjId, ai.Owner.TemplateId, x, y, z);
+            if (gridHeight.HasValue)
+                return gridHeight.Value;
+            // No grid data here — fall through to terrain.
+        }
+
+        // 3c. Generic floor volume lookup (any NPC on a building's collision floor).
+        var floorHeight = cvMgr.GetFloorHeight(worldName, x, y, z);
+        if (floorHeight.HasValue)
+            return floorHeight.Value;
+
+        // 4. Terrain height retrieval
         finalHeight = GetHeight(zoneId, x, y, z);
         if (finalHeight != 0/* && Math.Abs(worldHeight - Spawner.Position.Z) <= 0.1f*/)
         {
             return finalHeight;
         }
 
-        // 4. Take the default height
+        // 5. Take the default height
         return ai.Owner.Spawner?.Position.Z ?? ai.Owner.Transform.World.Position.Z;
     }
 

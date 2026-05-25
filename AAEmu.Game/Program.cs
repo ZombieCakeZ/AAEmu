@@ -276,6 +276,8 @@ public static class Program
                 services.AddSingleton<AreaTriggerManager>();
                 services.AddSingleton<IAreaTriggerManager>(sp => sp.GetRequiredService<AreaTriggerManager>());
 
+                services.AddSingleton<CollisionVolumeManager>();
+
                 services.AddSingleton<EnterWorldManager>();
                 services.AddSingleton<IEnterWorldManager>(sp => sp.GetRequiredService<EnterWorldManager>());
 

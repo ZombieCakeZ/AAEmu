@@ -27,6 +27,20 @@ public class ReturnStateBehavior : BaseCombatBehavior
         Ai.Owner.CurrentAlertness = MoveTypeAlertness.Idle;
         Ai.Owner.BroadcastPacket(new SCUnitModelPostureChangedPacket(Ai.Owner, Ai.Owner.AnimActionId, false), false);
 
+        // Clear evade immunity and wall state on return
+        Ai.Owner.WallBlockedTicks = 0;
+        if (Ai.Owner is AAEmu.Game.Models.Game.NPChar.Npc retNpc)
+        {
+            retNpc.CombatEvadeImmuneUntil = null;
+            retNpc.IsWallStuck = false;
+            retNpc._wallPath = [];
+            retNpc._wallPathIndex = 0;
+
+            // Remove immunity buff (7376) if it was applied
+            if (retNpc.Buffs.CheckBuff(7376))
+                retNpc.Buffs.RemoveBuff(7376);
+        }
+
         // Ai.AiPathPointsRemaining.Clear(); // Remove whatever path we're on
         // Ai.Owner.Simulation.TargetPosition = Vector3.Zero; // And reset expected target
 
@@ -87,9 +101,19 @@ public class ReturnStateBehavior : BaseCombatBehavior
         var distanceToIdle = MathUtil.CalculateDistance(Ai.IdlePosition, Ai.Owner.Transform.World.Position);
         if (distanceToIdle > 2 * 2)
         {
-            Ai.Owner.MoveTowards(Ai.IdlePosition, 1000000.0f);
+            // Direct teleport to spawn — bypasses wall collision so NPC doesn't get stuck
+            Ai.Owner.Transform.Local.SetPosition(Ai.IdlePosition.X, Ai.IdlePosition.Y, Ai.IdlePosition.Z);
             Ai.Owner.StopMovement();
         }
+
+        // Reset wall-blocked counter and evade immunity after teleport
+        Ai.Owner.WallBlockedTicks = 0;
+        Ai.Owner.CombatEvadeImmuneUntil = null;
+        Ai.Owner.IsWallStuck = false;
+
+        // Remove immunity buff (7376) if it was applied
+        if (Ai.Owner.Buffs.CheckBuff(7376))
+            Ai.Owner.Buffs.RemoveBuff(7376);
 
         OnCompletedReturnNoTeleport();
     }
