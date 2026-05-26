@@ -64,6 +64,45 @@ public partial class Npc : Unit
 
     public NpcAi Ai { get; set; } // New framework
 
+    /// <summary>
+    /// Counts consecutive movement ticks blocked by a collision wall.
+    /// Used for anti-stuck detection: if blocked for too many ticks, the NPC should leash/return.
+    /// </summary>
+    public int WallBlockedTicks { get; set; }
+
+    // ── Wall Pathfinding State ──
+
+    /// <summary>
+    /// Computed waypoints to navigate around a wall. Set by MoveTowards when hitting a wall.
+    /// The NPC follows these one by one until reaching the original target.
+    /// </summary>
+    internal List<Vector3> _wallPath = [];
+
+    /// <summary>
+    /// Current index into _wallPath. When >= _wallPath.Count, pathfinding is complete.
+    /// </summary>
+    internal int _wallPathIndex;
+
+    /// <summary>
+    /// The original movement target that triggered wall pathfinding.
+    /// Used to detect when the target changes (path becomes stale).
+    /// </summary>
+    internal Vector3 _wallPathTarget;
+
+    // ── Combat Evade Immunity ──
+
+    /// <summary>
+    /// When set, the NPC is immune to all damage until this time expires.
+    /// Activated when the NPC has been stuck for 3 seconds. After the
+    /// immunity window (5s) expires, ShouldReturn triggers and the NPC resets.
+    /// </summary>
+    public DateTime? CombatEvadeImmuneUntil { get; set; }
+
+    /// <summary>Tick count when NPC became wall-stuck. Uses Environment.TickCount64 for precision.</summary>
+    public long WallStuckSinceTick { get; set; }
+    /// <summary>True if NPC is currently considered wall-stuck.</summary>
+    public bool IsWallStuck { get; set; }
+
     public BaseUnit CurrentAggroTarget
     {
         get => _currentAggroTarget;
@@ -81,6 +120,14 @@ public partial class Npc : Unit
     }
 
     public bool CanFly { get; set; } // TODO: mark NPCs that can fly so that they don't land on the ground when calculating the Z height
+
+    /// <summary>
+    /// True if this NPC was spawned in water and should be constrained to water.
+    /// Determined automatically at spawn time by NpcSpawnerNpc: CanFly NPCs in water are
+    /// always aquatic; non-CanFly NPCs are aquatic only when spawned &gt;10m below the
+    /// water surface.
+    /// </summary>
+    public bool IsAquatic { get; set; }
 
     public override float BaseMoveSpeed
     {
@@ -834,6 +881,19 @@ public partial class Npc : Unit
         //Equip = new Item[28];
     }
 
+    /// <summary>
+    /// Override damage to block all damage while CombatEvadeImmuneUntil is active.
+    /// This gives the NPC 5 seconds of immunity when it can't reach a player through walls,
+    /// before it resets back to spawn.
+    /// </summary>
+    public override void ReduceCurrentHp(BaseUnit attacker, int value, KillReason killReason = KillReason.Damage)
+    {
+        if (CombatEvadeImmuneUntil.HasValue && DateTime.UtcNow < CombatEvadeImmuneUntil.Value)
+            return; // Evade immunity active — take no damage
+
+        base.ReduceCurrentHp(attacker, value, killReason);
+    }
+
     public override void DoDie(BaseUnit killer, KillReason killReason)
     {
         var eligiblePlayers = new HashSet<Character>();
@@ -1153,6 +1213,7 @@ public partial class Npc : Unit
     /// <returns>True if withing rangeTolerance of other</returns>
     public bool MoveTowards(Vector3 other, float distance, byte actorFlags = 4, float rangeTolerance = 1f)
     {
+        // Block all external movement while a SkillController (Lift, Fear, etc.) owns the NPC.
         if ((ActiveSkillController?.State ?? SkillController.SCState.Ended) == SkillController.SCState.Running)
             return false;
 
@@ -1194,19 +1255,289 @@ public partial class Npc : Unit
 
         var oldPosition = Transform.Local.ClonePosition();
 
-        var targetDist = MathUtil.CalculateDistance(Transform.Local.Position, other, true);
-        if (targetDist <= rangeTolerance)
-            return true;
+        // ── Wall pathfinding: if we're following a computed path, navigate waypoints ──
+        var cvWorldName = CollisionVolumeManager.GetWorldNameFromId(
+            WorldManager.Instance.GetWorldIdByZoneKey(Transform.ZoneId));
+
+        // Check if target changed significantly → invalidate old path
+        // Threshold 4f = 2m² — invalidate quickly so NPC navigates to where the player IS,
+        // not where they WERE when the path was computed
+        if (_wallPath.Count > 0 && Vector3.DistanceSquared(_wallPathTarget, other) > 4f)
+        {
+            _wallPath = [];
+            _wallPathIndex = 0;
+        }
+
+        // ── Global immunity check ──
+        // Check BEFORE the waypoint/direct branch split so immunity triggers regardless
+        // of whether the NPC is following waypoints or trying direct movement.
+        if (IsWallStuck
+            && (Environment.TickCount64 - WallStuckSinceTick) >= 3000 // 3 seconds in ms
+            && !CombatEvadeImmuneUntil.HasValue)
+        {
+            CombatEvadeImmuneUntil = DateTime.UtcNow.AddSeconds(5);
+
+            // Apply hidden immunity buff (7376) so the client sees immune feedback
+            const uint evadeImmuneBuffId = 7376;
+            if (!Buffs.CheckBuff(evadeImmuneBuffId))
+            {
+                var buffTemplate = SkillManager.Instance.GetBuffTemplate(evadeImmuneBuffId);
+                if (buffTemplate != null)
+                {
+                    var casterObj = new SkillCasterUnit(ObjId);
+                    var immuneBuff = new Buff(this, this, casterObj, buffTemplate, null, DateTime.UtcNow)
+                    {
+                        Passive = true   // Hidden from player buff bar
+                    };
+                    Buffs.AddBuff(immuneBuff);
+                }
+            }
+        }
+
+        // If we have an active wall path, follow waypoints instead of going direct
+        if (_wallPath.Count > 0 && _wallPathIndex < _wallPath.Count)
+        {
+            var waypoint = _wallPath[_wallPathIndex];
+            var wpDist = MathUtil.CalculateDistance(Transform.Local.Position, waypoint, true);
+
+            if (wpDist <= 1.0f) // Reached this waypoint
+            {
+                _wallPathIndex++;
+                if (_wallPathIndex >= _wallPath.Count)
+                {
+                    // Path complete — resume direct movement next tick
+                    _wallPath = [];
+                    _wallPathIndex = 0;
+                    return false;
+                }
+                waypoint = _wallPath[_wallPathIndex];
+            }
+
+            // Move toward current waypoint
+            var wpTravelDist = Math.Min(MathUtil.CalculateDistance(Transform.Local.Position, waypoint, true), distance);
+            var (wpNewX, wpNewY, wpNewZ) = World.Transform.PositionAndRotation.AddDistanceToFront(
+                wpTravelDist, MathUtil.CalculateDistance(Transform.Local.Position, waypoint, true),
+                Transform.Local.Position, waypoint);
+
+            // Height from GetReferenceHeight — CV-aware, heightmap fallback
+            var wpZ = WorldManager.Instance.GetReferenceHeight(Ai, wpNewX, wpNewY, Transform.Local.Position.Z, Transform.ZoneId);
+
+            // Use NPC's current Z for wall checks — walls at building height stay visible
+            // even if the destination reference height resolved to terrain.
+            var wpPosX = Transform.Local.Position.X;
+            var wpPosY = Transform.Local.Position.Y;
+            var wpPosZ = Transform.Local.Position.Z;
+            var wpWallBlocked = CollisionVolumeManager.Instance.IsBlockedByWall(cvWorldName,
+                wpPosX, wpPosY, wpNewX, wpNewY, wpPosZ);
+
+            if (!wpWallBlocked)
+            {
+                // Also check NPC body width (0.3m buffer on each side)
+                var wpMoveDx = wpNewX - wpPosX;
+                var wpMoveDy = wpNewY - wpPosY;
+                var wpMoveLen = MathF.Sqrt(wpMoveDx * wpMoveDx + wpMoveDy * wpMoveDy);
+                if (wpMoveLen > 0.001f)
+                {
+                    const float wpBodyBuf = 0.3f;
+                    var wpPerpX = -wpMoveDy / wpMoveLen * wpBodyBuf;
+                    var wpPerpY = wpMoveDx / wpMoveLen * wpBodyBuf;
+
+                    wpWallBlocked = CollisionVolumeManager.Instance.IsBlockedByWall(cvWorldName,
+                        wpPosX + wpPerpX, wpPosY + wpPerpY, wpNewX + wpPerpX, wpNewY + wpPerpY, wpPosZ)
+                    || CollisionVolumeManager.Instance.IsBlockedByWall(cvWorldName,
+                        wpPosX - wpPerpX, wpPosY - wpPerpY, wpNewX - wpPerpX, wpNewY - wpPerpY, wpPosZ);
+                }
+            }
+
+            if (wpWallBlocked)
+            {
+                // Waypoint is blocked — immediately try to repath from current position to target
+                _wallPath = [];
+                _wallPathIndex = 0;
+                WallBlockedTicks++;
+                if (!IsWallStuck) { IsWallStuck = true; WallStuckSinceTick = Environment.TickCount64; }
+
+                var repathTarget = _wallPathTarget;
+                var repath = CollisionVolumeManager.Instance.FindWallPath(cvWorldName,
+                    new Vector3(Transform.Local.Position.X, Transform.Local.Position.Y, Transform.Local.Position.Z),
+                    new Vector3(repathTarget.X, repathTarget.Y, repathTarget.Z),
+                    Transform.Local.Position.Z);
+
+                if (repath.Count > 1)
+                {
+                    _wallPath = repath;
+                    _wallPathIndex = 1;
+                    _wallPathTarget = repathTarget;
+                }
+
+                return false;
+            }
+
+            // Grid boundary check — grid-bound NPCs can only leave the grid via a Floor volume
+            if (CollisionVolumeManager.Instance.IsGridBoundNpcBlocked(
+                    ObjId, TemplateId, cvWorldName,
+                    Transform.Local.Position.X, Transform.Local.Position.Y, Transform.Local.Position.Z,
+                    wpNewX, wpNewY, wpZ))
+            {
+                _wallPath = [];
+                _wallPathIndex = 0;
+                WallBlockedTicks++;
+                return false;
+            }
+
+            // Safety clamp — prevent Z teleporting on floor detection errors
+            {
+                const float maxZStepPerTick = 0.5f;
+                var curZ = Transform.Local.Position.Z;
+                var zDelta = wpZ - curZ;
+                if (MathF.Abs(zDelta) > maxZStepPerTick)
+                    wpZ = curZ + MathF.Sign(zDelta) * maxZStepPerTick;
+            }
+
+            Transform.Local.SetPosition(wpNewX, wpNewY, wpZ);
+            other = waypoint; // For angle/velocity calculation below
+        }
+        else
+        {
+            // ── Normal direct movement ──
+            var targetDist = MathUtil.CalculateDistance(Transform.Local.Position, other, true);
+            if (targetDist <= rangeTolerance)
+            {
+                // NPC reached attack range — fully clear stuck state
+                WallBlockedTicks = 0;
+                IsWallStuck = false;
+                CombatEvadeImmuneUntil = null;
+                _wallPath = [];
+                _wallPathIndex = 0;
+
+                // Remove immunity buff if it was applied
+                if (Buffs.CheckBuff(7376))
+                    Buffs.RemoveBuff(7376);
+
+                return true;
+            }
+
+            // Check if NPC is close in 2D but blocked by height difference.
+            // This happens when the player is above (on roof/cliff) — no wall blocking,
+            // but the NPC can't reach. Without this, WallStuckSince is never set and
+            // immunity never triggers.
+            var targetDist2D = MathUtil.CalculateDistance(Transform.Local.Position, other, false);
+            var heightDiff = MathF.Abs(Transform.Local.Position.Z - other.Z);
+            if (targetDist2D <= rangeTolerance + 1.0f && heightDiff > 2.0f)
+            {
+                // NPC is directly below/above target but can't reach due to height
+                if (!IsWallStuck) { IsWallStuck = true; WallStuckSinceTick = Environment.TickCount64; }
+                return false;
+            }
+
+            var travelDist = Math.Min(targetDist, distance);
+
+            var (newX, newY, newZ) = World.Transform.PositionAndRotation.AddDistanceToFront(
+                travelDist, targetDist, Transform.Local.Position, other);
+
+            // Use NPC's CURRENT Z for the height lookup reference.
+            // Without this, AddDistanceToFront interpolates Z toward the target — if the
+            // target is far below (e.g., player on ground, NPC on 2nd floor), newZ drops
+            // significantly. GetBestFloorHeight then fails to find the floor (floorZ > newZ+tol)
+            // → NPC falls to terrain → walls become invisible (cascade bug).
+            // Exception: Aquatic NPCs use the INTERPOLATED Z (newZ) so they can swim in 3D
+            // toward targets at different depths. GetReferenceHeight clamps to water surface.
+            var currentZ = Transform.Local.Position.Z;
+            var heightRefZ = IsAquatic ? newZ : currentZ;
+            var targetPositionZ = WorldManager.Instance.GetReferenceHeight(
+                Ai, newX, newY, heightRefZ, Transform.ZoneId);
+
+            // Grid boundary check — grid-bound NPCs can only leave the grid via a Floor volume
+            if (CollisionVolumeManager.Instance.IsGridBoundNpcBlocked(
+                    ObjId, TemplateId, cvWorldName,
+                    Transform.Local.Position.X, Transform.Local.Position.Y, currentZ,
+                    newX, newY, targetPositionZ))
+            {
+                WallBlockedTicks++;
+                return false;
+            }
+
+            // Wall collision check — use NPC's current Z so walls at building height
+            // are always detected, regardless of what targetPositionZ resolved to.
+            // Also check body-buffer offset lines to match A* pathfinding precision.
+            var posX = Transform.Local.Position.X;
+            var posY = Transform.Local.Position.Y;
+            var isWallBlocked = CollisionVolumeManager.Instance.IsBlockedByWall(cvWorldName,
+                posX, posY, newX, newY, currentZ);
+
+            if (!isWallBlocked)
+            {
+                // Also check NPC body width (0.3m buffer on each side)
+                var moveDx = newX - posX;
+                var moveDy = newY - posY;
+                var moveLen = MathF.Sqrt(moveDx * moveDx + moveDy * moveDy);
+                if (moveLen > 0.001f)
+                {
+                    const float bodyBuf = 0.3f;
+                    var perpX = -moveDy / moveLen * bodyBuf;
+                    var perpY = moveDx / moveLen * bodyBuf;
+
+                    isWallBlocked = CollisionVolumeManager.Instance.IsBlockedByWall(cvWorldName,
+                        posX + perpX, posY + perpY, newX + perpX, newY + perpY, currentZ)
+                    || CollisionVolumeManager.Instance.IsBlockedByWall(cvWorldName,
+                        posX - perpX, posY - perpY, newX - perpX, newY - perpY, currentZ);
+                }
+            }
+
+            if (isWallBlocked)
+            {
+                WallBlockedTicks++;
+
+                // Track when the NPC first got stuck (timestamp-based, not tick-based)
+                if (!IsWallStuck) { IsWallStuck = true; WallStuckSinceTick = Environment.TickCount64; }
+
+                // Try A* pathfinding every 3 ticks while blocked.
+                if (WallBlockedTicks == 1 || WallBlockedTicks % 3 == 0)
+                {
+                    var path = CollisionVolumeManager.Instance.FindWallPath(cvWorldName,
+                        new Vector3(Transform.Local.Position.X, Transform.Local.Position.Y, currentZ),
+                        new Vector3(other.X, other.Y, other.Z), currentZ);
+
+                    if (path.Count > 1)
+                    {
+                        _wallPath = path;
+                        _wallPathIndex = 1; // Skip index 0 (NPC's current position)
+                        _wallPathTarget = other;
+                    }
+                }
+
+                return false;
+            }
+
+            // Movement is clear for this tick. Reset wall-blocked counter and path,
+            // but do NOT reset WallStuckSince/Immunity here! The NPC might be in a
+            // cycle: A* path → 1 tick clear → direct blocked again. WallStuckSince must
+            // persist so the 3-second immunity timer actually counts up. These are only
+            // cleared when the NPC reaches attack range (MoveTowards returns true).
+            WallBlockedTicks = 0;
+            _wallPath = [];
+            _wallPathIndex = 0;
+
+            // Aquatic NPCs must not leave water
+            if (IsAquatic)
+            {
+                var aquaticWorld = WorldManager.Instance.GetWorld(Transform.InstanceId);
+                if (aquaticWorld != null && !aquaticWorld.IsWater(new Vector3(newX, newY, targetPositionZ)))
+                    return false;
+            }
+
+            // Safety clamp — prevent Z teleporting on floor detection errors
+            {
+                const float maxZStepPerTick = 0.5f;
+                var zDelta = targetPositionZ - currentZ;
+                if (MathF.Abs(zDelta) > maxZStepPerTick)
+                    targetPositionZ = currentZ + MathF.Sign(zDelta) * maxZStepPerTick;
+            }
+
+            Transform.Local.SetPosition(newX, newY, targetPositionZ);
+        }
 
         var moveType = (UnitMoveType)MoveType.GetType(MoveTypeEnum.Unit);
-
-        var travelDist = Math.Min(targetDist, distance);
-
-        // TODO: Implement proper use for Transform.World.AddDistanceToFront
-        var (newX, newY, newZ) = World.Transform.PositionAndRotation.AddDistanceToFront(travelDist, targetDist, Transform.Local.Position, other);
-        var targetPositionZ = WorldManager.Instance.GetReferenceHeight(Ai, newX, newY, newZ, Transform.ZoneId);
-        Transform.Local.SetPosition(newX, newY, targetPositionZ);
-
         var angle = MathUtil.CalculateAngleFrom(Transform.Local.Position, other);
         var (velX, velY) = MathUtil.AddDistanceToFront(4000, 0, 0, (float)angle.DegToRad());
         Transform.Local.SetRotationDegree(0f, 0f, (float)angle - 90);

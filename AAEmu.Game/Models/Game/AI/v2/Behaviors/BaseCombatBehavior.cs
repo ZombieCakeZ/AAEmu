@@ -8,6 +8,7 @@ using AAEmu.Game.Models.Game.AI.v2.Framework;
 using AAEmu.Game.Models.Game.AI.v2.Params;
 using AAEmu.Game.Models.Game.AI.v2.Params.Almighty;
 using AAEmu.Game.Models.Game.Char;
+using AAEmu.Game.Models.Game.NPChar;
 using AAEmu.Game.Models.Game.Skills;
 using AAEmu.Game.Models.Game.Skills.SkillControllers;
 using AAEmu.Game.Models.Game.Units;
@@ -204,9 +205,50 @@ public abstract class BaseCombatBehavior : Behavior
         else
         {
             if (distanceToTarget > range && target != null)
+            {
+                var ownerPos = Ai.Owner.Transform.World.Position;
+                var targetPos = target.Transform.World.Position;
+                var cvWorld = CollisionVolumeManager.GetWorldNameFromId(Ai.Owner.Transform.WorldId);
+
+                if (!string.IsNullOrEmpty(cvWorld) &&
+                    CollisionVolumeManager.Instance.IsBlockedByWall(cvWorld,
+                        ownerPos.X, ownerPos.Y, targetPos.X, targetPos.Y, ownerPos.Z))
+                {
+                    if (Ai.Owner is Npc npc && (npc._wallPath == null || npc._wallPath.Count == 0))
+                    {
+                        var path = CollisionVolumeManager.Instance.FindWallPath(
+                            cvWorld,
+                            new Vector3(ownerPos.X, ownerPos.Y, ownerPos.Z),
+                            new Vector3(targetPos.X, targetPos.Y, targetPos.Z),
+                            ownerPos.Z);
+                        if (path.Count > 1)
+                        {
+                            npc._wallPath = path;
+                            npc._wallPathIndex = 1;
+                            npc._wallPathTarget = targetPos;
+                            if (!npc.IsWallStuck) { npc.IsWallStuck = true; npc.WallStuckSinceTick = Environment.TickCount64; }
+                        }
+                    }
+                }
+
                 Ai.Owner.MoveTowards(target.Transform.World.Position, (float)speed, moveFlags);
+            }
             else
+            {
+                if (Ai.Owner is Npc reachNpc &&
+                    (reachNpc.CombatEvadeImmuneUntil.HasValue || reachNpc.IsWallStuck))
+                {
+                    reachNpc.WallBlockedTicks = 0;
+                    reachNpc.IsWallStuck = false;
+                    reachNpc.CombatEvadeImmuneUntil = null;
+                    reachNpc._wallPath = [];
+                    reachNpc._wallPathIndex = 0;
+                    if (reachNpc.Buffs.CheckBuff(7376))
+                        reachNpc.Buffs.RemoveBuff(7376);
+                }
+
                 Ai.Owner.StopMovement();
+            }
         }
     }
 

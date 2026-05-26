@@ -94,12 +94,87 @@ public class NpcSpawnerNpc : Spawner<Npc>
 
         Logger.Trace($"Spawn npc templateId {MemberId} objId {npc.ObjId} from spawnerId {NpcSpawnerTemplateId} at Position: {npcSpawner.Position}");
 
-        if (!npc.CanFly)
+        // Determine if NPC is aquatic based on spawn position relative to water surface.
+        // CanFly NPCs in water are always aquatic (fish, rays, etc.)
+        // Non-CanFly NPCs are aquatic only if spawned deep underwater (>10m below surface)
+        // to avoid false-tagging coastal/beach NPCs whose feet are in shallow water.
+        var preSpawnWorld = npcSpawner.ParentWorld != null
+            ? WorldManager.Instance.GetWorld(npcSpawner.ParentWorld.Id)
+            : null;
+        var spawnVec = npcSpawner.Position.AsPositionVector();
+        if (preSpawnWorld != null && preSpawnWorld.IsWater(spawnVec))
         {
-            var newZ = npcSpawner.ParentWorld.Template.GeoData.GetHeight(npcSpawner.Position.AsPositionVector());// WorldManager.Instance.GetHeight(npcSpawner.Position.ZoneId, npcSpawner.Position.X, npcSpawner.Position.Y, npcSpawner.Position.Z);
-            if (Math.Abs(npcSpawner.Position.Z - newZ) < 1f)
+            if (npc.CanFly)
             {
-                npcSpawner.Position.Z = newZ;
+                npc.IsAquatic = true;
+            }
+            else
+            {
+                // Check depth: only tag as aquatic if spawn is >10m below water surface
+                var waterSurface = preSpawnWorld.Water != null
+                    ? preSpawnWorld.Water.GetWaterSurface(spawnVec, out _)
+                    : preSpawnWorld.Template.OceanLevel;
+                if (npcSpawner.Position.Z < waterSurface - 10f)
+                    npc.IsAquatic = true;
+            }
+        }
+
+        if (!npc.CanFly && !npc.IsAquatic)
+        {
+            // Check height grids first — if a grid covers the spawn position,
+            // snap the NPC to the grid height instead of falling back to terrain.
+            var spawnWorldId = npcSpawner.ParentWorld?.Id ?? 0;
+            var cvWorldName = CollisionVolumeManager.GetWorldNameFromId(spawnWorldId);
+
+            // Check template-level bindings (manual /cv gridbind) first — they always win.
+            var gridBindings = CollisionVolumeManager.Instance.GetNpcGridBinding(MemberId);
+
+            float? gridHeight = null;
+            if (gridBindings != null && gridBindings.Count > 0)
+            {
+                // NPC has template-level grid bindings — check those grids
+                if (gridBindings.Contains("*"))
+                {
+                    gridHeight = CollisionVolumeManager.Instance.GetGridHeight(
+                        cvWorldName, npcSpawner.Position.X, npcSpawner.Position.Y, npcSpawner.Position.Z);
+                }
+                else
+                {
+                    foreach (var gn in gridBindings)
+                    {
+                        var g = CollisionVolumeManager.Instance.GetHeightGridByName(gn);
+                        if (g != null)
+                        {
+                            var h = g.GetBestFloorHeight(npcSpawner.Position.X, npcSpawner.Position.Y, npcSpawner.Position.Z);
+                            if (h.HasValue)
+                            {
+                                gridHeight = h;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            // Auto-bind disabled by design: only manual /cv gridbind template-level bindings
+            // attach NPCs to grids. Open-world NPCs use the Heightmap System only.
+
+            if (gridHeight.HasValue)
+            {
+                // Grid found (template) — snap spawn Z to grid height directly.
+                // No terrain fallback runs after this; the grid IS the ground truth here.
+                npcSpawner.Position.Z = gridHeight.Value;
+            }
+            else
+            {
+                // No grid covers this spawn position — fall back to terrain height.
+                // Only correct when the DB Z is already very close to terrain (<1m), so we
+                // don't yank an NPC off a building/structure that lacks a grid.
+                var newZ = npcSpawner.ParentWorld?.Template?.GeoData?.GetHeight(npcSpawner.Position.AsPositionVector())
+                           ?? 0f;
+                if (newZ > 0f && Math.Abs(npcSpawner.Position.Z - newZ) < 1f)
+                {
+                    npcSpawner.Position.Z = newZ;
+                }
             }
         }
 

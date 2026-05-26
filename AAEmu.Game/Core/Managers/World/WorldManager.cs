@@ -832,6 +832,37 @@ public class WorldManager(
             return finalHeight;
         }
 
+        // 0a. Aquatic NPCs: clamp Z between terrain floor and water surface so they
+        //     swim in 3D within the water column instead of glitching under the map
+        //     or breaching the surface. Wins over CanFly / Hold / Idle behavior gates
+        //     because aquatic fliers (rays, sharks, fish) are tagged IsAquatic at spawn
+        //     and must stay submerged.
+        if (ai.Owner.IsAquatic)
+        {
+            var terrainHeight = GetHeight(zoneId, x, y, z);
+            var aquaticWorld = GetWorld(ai.Owner.Transform.InstanceId);
+            // Large aquatic NPCs (e.g. Kraken, template 7607) need extra submersion
+            // so they don't visually breach the surface during combat.
+            var submersionDepth = ai.Owner.TemplateId == 7607 ? 20f : 0f;
+            // Kraken: lock to spawn depth when not in combat, only dive deeper when fighting.
+            var minZ = (ai.Owner.TemplateId == 7607 && !ai.Owner.IsInBattle && ai.Owner.Spawner != null)
+                ? ai.Owner.Spawner.Position.Z
+                : terrainHeight;
+            if (aquaticWorld?.Water != null)
+            {
+                var waterSurface = aquaticWorld.Water.GetWaterSurface(new Vector3(x, y, z), out _);
+                var maxZ = waterSurface - submersionDepth;
+                return Math.Max(minZ, Math.Min(z, maxZ));
+            }
+            // Fallback when no water bodies are available: ocean level from world template.
+            if (aquaticWorld != null)
+            {
+                var maxZ = aquaticWorld.Template.OceanLevel - submersionDepth;
+                return Math.Max(minZ, Math.Min(z, maxZ));
+            }
+            return Math.Max(minZ, z);
+        }
+
         // 1. If an NPC can fly, the height is taken from the spawner's position.
         if (ai.Owner.CanFly)
         {
@@ -848,14 +879,57 @@ public class WorldManager(
                 return finalHeight;
         }
 
-        // 3. Terrain height retrieval
+        // 3. Consult CollisionVolumeManager first — bound NPCs get exclusive volume heights,
+        //    grid-bound NPCs prefer grid/volume height over terrain, and any active Floor
+        //    volume at this position takes precedence over the heightmap (handles buildings).
+        var cvMgr = CollisionVolumeManager.Instance;
+        var worldName = CollisionVolumeManager.GetWorldNameFromId(GetWorldIdByZoneKey(zoneId));
+
+        // 3a. NPCs explicitly bound to specific volumes use ONLY those (ignore terrain).
+        var binding = cvMgr.GetNpcBinding(ai.Owner.TemplateId);
+        if (binding != null && binding.Count > 0)
+        {
+            var boundHeight = cvMgr.GetBoundFloorHeight(worldName, x, y, z, binding);
+            if (boundHeight.HasValue)
+                return boundHeight.Value;
+            // Bound NPC outside its volumes — fall through to terrain to avoid hovering.
+        }
+
+        // 3b. Grid-bound NPCs (instance- or template-level) prefer grid/volume height.
+        if (cvMgr.IsNpcBoundToAnyGrid(ai.Owner.ObjId, ai.Owner.TemplateId))
+        {
+            var gridHeight = cvMgr.GetGridHeightForNpc(ai.Owner.ObjId, ai.Owner.TemplateId, x, y, z);
+            if (gridHeight.HasValue)
+                return gridHeight.Value;
+            // No grid data here — fall through to terrain.
+        }
+
+        // 3b-active. Unbound NPCs walking ON a grid cell follow the grid height too,
+        //   but only if the grid floor is within tolerance of the NPC's current Z.
+        //   Tolerance prevents snapping when an NPC falls past a grid from above
+        //   or roams below a roof grid. NPCs can freely walk onto and off the grid.
+        if (cvMgr.HasGridData(worldName, x, y))
+        {
+            const float activeGridZTolerance = 2.0f;
+            var currentNpcZ = ai.Owner.Transform.Local.Position.Z;
+            var activeGrid = cvMgr.GetGridHeight(worldName, x, y, currentNpcZ);
+            if (activeGrid.HasValue && MathF.Abs(activeGrid.Value - currentNpcZ) <= activeGridZTolerance)
+                return activeGrid.Value;
+        }
+
+        // 3c. Generic floor volume lookup (any NPC on a building's collision floor).
+        var floorHeight = cvMgr.GetFloorHeight(worldName, x, y, z);
+        if (floorHeight.HasValue)
+            return floorHeight.Value;
+
+        // 4. Terrain height retrieval
         finalHeight = GetHeight(zoneId, x, y, z);
         if (finalHeight != 0/* && Math.Abs(worldHeight - Spawner.Position.Z) <= 0.1f*/)
         {
             return finalHeight;
         }
 
-        // 4. Take the default height
+        // 5. Take the default height
         return ai.Owner.Spawner?.Position.Z ?? ai.Owner.Transform.World.Position.Z;
     }
 

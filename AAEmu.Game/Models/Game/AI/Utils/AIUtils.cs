@@ -1,4 +1,5 @@
-﻿using System.Numerics;
+﻿using System;
+using System.Numerics;
 using AAEmu.Game.Core.Managers.World;
 using AAEmu.Game.Models.Game.AI.Enums;
 using AAEmu.Game.Models.Game.AI.v2.AiCharacters;
@@ -14,15 +15,57 @@ public static class AiUtils
     public static Vector3 CalcNextRoamingPosition(NpcAi ai)
     {
         var maxRoamingDistance = 6;
-        var newPosition = new Vector3(
-            (Random.Shared.NextSingle() - 0.5f) * maxRoamingDistance * 2 + ai.IdlePosition.X,
-            (Random.Shared.NextSingle() - 0.5f) * maxRoamingDistance * 2 + ai.IdlePosition.Y,
-            ai.IdlePosition.Z);
+        var maxAttempts = ai.Owner.IsAquatic ? 10 : 6;
 
-        // Get terrain height at new position
-        newPosition.Z = WorldManager.Instance.GetReferenceHeight(ai, newPosition.X, newPosition.Y, newPosition.Z, ai.Owner.Transform.ZoneId);
+        var cvWorldName = CollisionVolumeManager.GetWorldNameFromId(
+            WorldManager.Instance.GetWorldIdByZoneKey(ai.Owner.Transform.ZoneId));
 
-        return newPosition;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var roamZ = ai.IdlePosition.Z;
+            if (ai.Owner.IsAquatic)
+                roamZ += (Random.Shared.NextSingle() - 0.5f) * maxRoamingDistance;
+
+            var newPosition = new Vector3(
+                (Random.Shared.NextSingle() - 0.5f) * maxRoamingDistance * 2 + ai.IdlePosition.X,
+                (Random.Shared.NextSingle() - 0.5f) * maxRoamingDistance * 2 + ai.IdlePosition.Y,
+                roamZ);
+
+            newPosition.Z = WorldManager.Instance.GetReferenceHeight(ai, newPosition.X, newPosition.Y, newPosition.Z, ai.Owner.Transform.ZoneId);
+
+            if (ai.Owner.IsAquatic)
+            {
+                var world = WorldManager.Instance.GetWorld(ai.Owner.Transform.InstanceId);
+                if (world != null && !world.IsWater(newPosition))
+                    continue;
+            }
+
+            if (!string.IsNullOrEmpty(cvWorldName))
+            {
+                var curPos = ai.Owner.Transform.World.Position;
+                if (CollisionVolumeManager.Instance.IsBlockedByWall(cvWorldName,
+                        curPos.X, curPos.Y,
+                        newPosition.X, newPosition.Y, newPosition.Z) ||
+                    CollisionVolumeManager.Instance.IsBlockedByWall(cvWorldName,
+                        ai.IdlePosition.X, ai.IdlePosition.Y,
+                        newPosition.X, newPosition.Y, newPosition.Z))
+                {
+                    continue;
+                }
+
+                if (CollisionVolumeManager.Instance.IsGridBoundNpcBlocked(
+                        ai.Owner.ObjId, ai.Owner.TemplateId, cvWorldName,
+                        ai.IdlePosition.X, ai.IdlePosition.Y, ai.IdlePosition.Z,
+                        newPosition.X, newPosition.Y, newPosition.Z))
+                {
+                    continue;
+                }
+            }
+
+            return newPosition;
+        }
+
+        return ai.IdlePosition;
     }
 
     public static NpcAi GetAiByType(AiParamType type, Npc owner)
