@@ -26,5 +26,12 @@
 			"User": "%db_user%"
 		}
 	},
-	"GameServers": []
+	"GameServers": [
+		{
+			"Id": 1,
+			"Name": "AAEmu 2.0",
+			"Host": "127.0.0.1",
+			"Port": 1239
+		}
+	]
 }
