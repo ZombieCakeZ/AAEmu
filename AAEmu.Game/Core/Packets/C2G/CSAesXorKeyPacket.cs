@@ -29,6 +29,9 @@ public class CSAesXorKeyPacket() : GamePacket(CSOffsets.CSAesXorKeyPacket, 1)
         EncryptionManager.Instance.StoreClientKeys(encAes, encXor, Connection.AccountId, Connection.Id);
 
         Connection.SendPacket(new SCGetSlotCountPacket(0));
+        // 31 ulongs of attendance bitmask — the 2.0 client refuses to render
+        // the char-select screen without this between SlotCount and CharList.
+        Connection.SendPacket(new SCAccountAttendancePacket(31));
 
         Connection.LoadAccount();
         Connection.SendPacket(new SCRaceCongestionPacket());
