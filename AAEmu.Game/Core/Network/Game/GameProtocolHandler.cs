@@ -28,6 +28,7 @@ public class GameProtocolHandler : BaseProtocolHandler
         _packets.TryAdd(1, new ConcurrentDictionary<uint, Type>());
         _packets.TryAdd(2, new ConcurrentDictionary<uint, Type>());
         _packets.TryAdd(5, new ConcurrentDictionary<uint, Type>());
+        _packetsMirror = _packets;
     }
 
     /// <summary>
@@ -246,9 +247,54 @@ public class GameProtocolHandler : BaseProtocolHandler
     /// <param name="stream"></param>
     private static void HandleUnknownPacket(GameConnection connection, uint type, byte level, PacketStream stream)
     {
-        var dump = new StringBuilder();
+        var len = stream.Count - stream.Pos;
+        var hex = new StringBuilder(len * 3);
+        var ascii = new StringBuilder(len);
         for (var i = stream.Pos; i < stream.Count; i++)
-            dump.AppendFormat("{0:x2} ", stream.Buffer[i]);
-        Logger.Error($"Unknown packet 0x{type:x2}({level}) from {connection.Ip}:\n{dump}");
+        {
+            var b = stream.Buffer[i];
+            hex.AppendFormat("{0:x2} ", b);
+            ascii.Append(b is >= 0x20 and < 0x7f ? (char)b : '.');
+        }
+
+        // Try to find the packet name from CSOffsets / SCOffsets so we don't have to grep.
+        // If the opcode is registered on a DIFFERENT level we hint at it — that's the
+        // 'registered at Level 1 but client sends Level 5' situation.
+        var name = LookupOpcodeName(type);
+        var registeredOnOtherLevel = false;
+        foreach (var lv in new byte[] { 1, 2, 5 })
+        {
+            if (lv == level) continue;
+            if (_packetsMirror is { } pm && pm.TryGetValue(lv, out var map) && map.ContainsKey(type))
+            {
+                registeredOnOtherLevel = true;
+                break;
+            }
+        }
+        var hint = registeredOnOtherLevel ? "  (registered at a DIFFERENT level — try moving registration to this level)" : "";
+
+        Logger.Error("Unknown packet 0x{0:X3}({1}) name={2} from {3}, {4} bytes:{5}\n  hex   : {6}\n  ascii : {7}",
+            type, level, name, connection.Ip, len, hint, hex.ToString().TrimEnd(), ascii);
+    }
+
+    // Mirror reference so the helper above can introspect the dispatch table without
+    // forcing every caller to thread it in. Set by the constructor on first build.
+    private static ConcurrentDictionary<byte, ConcurrentDictionary<uint, Type>>? _packetsMirror;
+
+    private static string LookupOpcodeName(uint opcode)
+    {
+        // Scan the constants in CSOffsets / SCOffsets via reflection so the name list
+        // stays current automatically. Cheap because both classes are static + small.
+        foreach (var fi in typeof(Packets.C2G.CSOffsets).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+        {
+            if (fi.FieldType == typeof(ushort) && (ushort?)fi.GetValue(null) == opcode)
+                return "C2G." + fi.Name;
+        }
+        foreach (var fi in typeof(Packets.G2C.SCOffsets).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+        {
+            if (fi.FieldType == typeof(ushort) && (ushort?)fi.GetValue(null) == opcode)
+                return "G2C." + fi.Name;
+        }
+        return "(unknown)";
     }
 }
