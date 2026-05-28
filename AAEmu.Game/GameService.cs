@@ -110,6 +110,10 @@ public sealed class GameService : IHostedService, IDisposable
         CharacterManager.Instance.CheckForDeletedCharacters();
         CharacterManager.Instance.StartOnlineTracking();
 
+        // 2.0.1.7 encryption: initialise per-connection key store before clients
+        // can hit the AesXorKey exchange.
+        AAEmu.Commons.Cryptography.EncryptionManager.Instance.Load();
+
         GameNetwork.Instance.Start();
         StreamNetwork.Instance.Start();
         LoginNetwork.Instance.Start();

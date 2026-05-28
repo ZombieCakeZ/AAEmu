@@ -20,6 +20,13 @@ public class GameNetwork : Singleton<GameNetwork>
     {
         _handler = new GameProtocolHandler();
 
+        // 2.0.1.7 encryption key exchange. The Level 1 variant is what the client
+        // sends right after seeing the RSA public key in X2EnterWorldResponsePacket.
+        // The Level 5 variant covers the post-handshake renewal path. Both opcodes
+        // are 0x0de — the protocol handler disambiguates by Level.
+        RegisterPacket(CSOffsets.CSAesXorKeyPacket, 1, typeof(CSAesXorKeyPacket));
+        RegisterPacket(CSOffsets.CSAesXorKey_05_Packet, 5, typeof(CSAesXorKey_05_Packet));
+
         // World
         RegisterPacket(CSOffsets.X2EnterWorldPacket, 1, typeof(X2EnterWorldPacket));
         RegisterPacket(CSOffsets.CSLeaveWorldPacket, 1, typeof(CSLeaveWorldPacket));

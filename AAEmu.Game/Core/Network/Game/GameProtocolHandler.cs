@@ -23,9 +23,11 @@ public class GameProtocolHandler : BaseProtocolHandler
     public GameProtocolHandler()
     {
         _packets = new ConcurrentDictionary<byte, ConcurrentDictionary<uint, Type>>();
-        // For 1.2 client we only have Level1 and Level2 packets
+        // 2.0.1.7 uses Level 1 for the join handshake, Level 2 for legacy ping,
+        // and Level 5 for the encrypted main protocol (post-AES handshake).
         _packets.TryAdd(1, new ConcurrentDictionary<uint, Type>());
         _packets.TryAdd(2, new ConcurrentDictionary<uint, Type>());
+        _packets.TryAdd(5, new ConcurrentDictionary<uint, Type>());
     }
 
     /// <summary>
@@ -167,6 +169,32 @@ public class GameProtocolHandler : BaseProtocolHandler
                     {
                         _ = stream2.ReadByte(); // TODO: verify 1.2 crc
                         _ = stream2.ReadByte(); // TODO: verify 1.2 counter
+                    }
+
+                    if (level == 5)
+                    {
+                        // 2.0.1.7 incoming Level-5 frame is XOR + AES encrypted.
+                        // EncryptionManager.Decode expects [0xDD][level][crcKey][cipher...]
+                        // so we hand it the buffer from absolute offset 2 (where the
+                        // 0xDD byte lives). The plaintext we get back is
+                        // [msgCount:1][type:2][payload:N]; we splice the type +
+                        // payload back into stream2 in place of the encrypted body
+                        // and let the normal type-dispatch path continue.
+                        var stream2Bytes = stream2.GetBytes();
+                        var input = new byte[stream2Bytes.Length - 2];
+                        System.Buffer.BlockCopy(stream2Bytes, 2, input, 0, input.Length);
+                        var output = AAEmu.Commons.Cryptography.EncryptionManager.Instance.Decode(
+                            input, connection.Id, connection.AccountId);
+
+                        var outBytes = new byte[output.Length + 5];
+                        System.Buffer.BlockCopy(stream2Bytes, 0, outBytes, 0, 5);
+                        System.Buffer.BlockCopy(output, 1, outBytes, 5, output.Length - 1);
+
+                        var replacement = new PacketStream();
+                        replacement.Write(outBytes);
+                        stream2.Replace(replacement, 0, outBytes.Length);
+                        // Skip the trailing crcKey byte; pointer lands on the type.
+                        stream2.ReadUInt16();
                     }
 
                     var type = stream2.ReadUInt16();
