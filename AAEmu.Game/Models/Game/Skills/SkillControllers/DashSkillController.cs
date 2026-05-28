@@ -2,6 +2,8 @@ using System.Numerics;
 
 using AAEmu.Game.Core.Managers;
 using AAEmu.Game.Core.Packets.G2C;
+using AAEmu.Game.Models.Game.Char;
+using AAEmu.Game.Models.Game.NPChar;
 using AAEmu.Game.Models.Game.Skills.Templates;
 using AAEmu.Game.Models.Game.Units;
 using AAEmu.Game.Models.Game.Units.Movements;
@@ -114,8 +116,29 @@ public class DashSkillController : SkillController
                 return;
             }
 
-            if (Owner.Buffs.CheckBuffs(SkillManager.Instance.GetBuffsByTagId((uint)SkillConstants.Shackle)) ||
-                Owner.Buffs.CheckBuffs(SkillManager.Instance.GetBuffsByTagId((uint)SkillConstants.Snare)))
+            // Player-source dash: ends on combat engagement (per Zeromus on PR #1439).
+            // A player cannot dash while in combat — the skill cast validates that — so
+            // the trigger that ends a voluntary dash mid-flight is "entered combat",
+            // not "got snared" or "got slowed". Hostile snares / roots normally also
+            // flag the player into combat via aggro, so the practical outcome on a
+            // snare hit is unchanged. Pure slows that do NOT cause combat engagement
+            // (self-applied, friendly slow) just reduce speed via Owner.MoveSpeedMul.
+            if (Owner is Character && Owner.IsInBattle)
+            {
+                End();
+                return;
+            }
+
+            // NPC voluntary dash (rare): players cannot snare an NPC out of combat
+            // (the NPC is already battling), so the IsInBattle trigger above never
+            // fires for NPCs. Keep the hard-root gate so a snared NPC mid-dash does
+            // not run forever. Slow debuffs ride along via the DecreaseMoveSpeed
+            // exclusion. Matches Npc.MoveTowards and BaseCombatBehavior.MoveInRange.
+            if (Owner is Npc && (
+                Owner.Buffs.CheckBuffsExcludingTags(
+                    SkillManager.Instance.GetBuffsByTagId((uint)SkillConstants.Shackle),
+                    [(uint)SkillConstants.DecreaseMoveSpeed]) ||
+                Owner.Buffs.CheckBuffs(SkillManager.Instance.GetBuffsByTagId((uint)SkillConstants.Snare))))
             {
                 End();
                 return;
