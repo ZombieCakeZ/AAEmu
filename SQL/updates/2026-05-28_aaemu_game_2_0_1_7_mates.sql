@@ -1,6 +1,9 @@
 -- 2.0.1.7 compatibility: persistent mate (companion) state.
 -- See Docs/Schema_Delta_1_2_vs_2_0_1_7.md.
 
+-- No FK to characters(id): characters has composite PK (id, account_id),
+-- so a single-column FK can't reference it without an extra index. Cleanup of
+-- orphaned mates is the MateManager's job on character delete.
 CREATE TABLE IF NOT EXISTS `mates` (
     `id`                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `owner_character_id`  INT UNSIGNED NOT NULL,
@@ -14,11 +17,7 @@ CREATE TABLE IF NOT EXISTS `mates` (
     `created_at`          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `last_summoned_at`    DATETIME NULL,
     PRIMARY KEY (`id`),
-    KEY `idx_mates_owner` (`owner_character_id`),
-    CONSTRAINT `fk_mates_owner`
-        FOREIGN KEY (`owner_character_id`)
-        REFERENCES `characters` (`id`)
-        ON DELETE CASCADE
+    KEY `idx_mates_owner` (`owner_character_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `mate_equipment` (
