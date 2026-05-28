@@ -18,7 +18,7 @@ public class FinishStatePacket() : GamePacket(PPOffsets.FinishStatePacket, 2)
         {
             case 0:
                 Connection.SendPacket(new ChangeStatePacket(1));
-                // Connection.SendPacket(new SCHackGuardRetAddrsRequestPacket(false, false)); // HG_REQ? // TODO - config files
+                Connection.SendPacket(new SCHackGuardRetAddrsRequestPacket(false, false));
                 var levelname = string.Empty;
                 if (Connection.ActiveChar != null)
                 {
@@ -45,10 +45,14 @@ public class FinishStatePacket() : GamePacket(PPOffsets.FinishStatePacket, 2)
                         Connection.Payment.StartTime,
                         Connection.Payment.EndTime)
                 );
-                // SCChatSpamDelayPacket dropped: its opcode is in the 0xFF00 sentinel
-                // range (1.2-only) and the 2.0 client errors on unknown opcodes.
+                // SCChatSpamDelayPacket (1.2 opcode in the 0xFF00 sentinel range) is
+                // replaced by SCChatSpamConfigPacket — the 2.0 client refuses to leave
+                // the loading screen without it.
+                Connection.SendPacket(new SCChatSpamConfigPacket());
                 Connection.SendPacket(new SCAccountAttributeConfigPacket(_scAccountInitPacket));
                 Connection.SendPacket(new SCLevelRestrictionConfigPacket(10, 10, 10, 10, 10, _scLevelRestrictionInitPacket));
+                Connection.SendPacket(new SCTaxItemConfigPacket(10000));
+                Connection.SendPacket(new SCInGameShopConfigPacket(1, 0, 0));
                 break;
             case 1:
                 Connection.SendPacket(new ChangeStatePacket(2));
