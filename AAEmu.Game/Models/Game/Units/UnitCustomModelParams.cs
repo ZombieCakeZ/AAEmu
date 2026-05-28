@@ -81,12 +81,22 @@ public class FaceModel : PacketMarshaler
         MovableDecalMoveX = stream.ReadInt16();
         MovableDecalMoveY = stream.ReadInt16();
 
-        foreach (var asset in FixedDecalAsset)
-            asset.Read(stream);
+        // 2.0.1.7: FixedDecal asset IDs are PISC-packed (4 entries),
+        // weights come later as a flat float[4] — interleaved id/weight is 1.2 only.
+        var mAssets = stream.ReadPisc(4);
+        FixedDecalAsset[0].AssetId = (uint)mAssets[0];
+        FixedDecalAsset[1].AssetId = (uint)mAssets[1];
+        FixedDecalAsset[2].AssetId = (uint)mAssets[2];
+        FixedDecalAsset[3].AssetId = (uint)mAssets[3];
 
-        DiffuseMapId = stream.ReadUInt32();
-        NormalMapId = stream.ReadUInt32();
-        EyelashMapId = stream.ReadUInt32();
+        var mMap = stream.ReadPisc(3);
+        DiffuseMapId = (uint)mMap[0];
+        NormalMapId = (uint)mMap[1];
+        EyelashMapId = (uint)mMap[2];
+
+        for (var i = 0; i < 4; i++)
+            FixedDecalAsset[i].AssetWeight = stream.ReadSingle();
+
         NormalMapWeight = stream.ReadSingle();
         LipColor = stream.ReadUInt32();
         LeftPupilColor = stream.ReadUInt32();
@@ -106,12 +116,12 @@ public class FaceModel : PacketMarshaler
         stream.Write(MovableDecalMoveX);
         stream.Write(MovableDecalMoveY);
 
-        foreach (var asset in FixedDecalAsset)
-            stream.Write(asset);
+        stream.WritePisc(FixedDecalAsset[0].AssetId, FixedDecalAsset[1].AssetId, FixedDecalAsset[2].AssetId, FixedDecalAsset[3].AssetId);
+        stream.WritePisc(DiffuseMapId, NormalMapId, EyelashMapId);
 
-        stream.Write(DiffuseMapId);
-        stream.Write(NormalMapId);
-        stream.Write(EyelashMapId);
+        for (var i = 0; i < 4; i++)
+            stream.Write(FixedDecalAsset[i].AssetWeight);
+
         stream.Write(NormalMapWeight);
         stream.Write(LipColor);
         stream.Write(LeftPupilColor);
