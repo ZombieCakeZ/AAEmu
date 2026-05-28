@@ -15,7 +15,11 @@ public class ACAuthResponsePacket(AccountId accountId, byte slotCount) : LoginPa
 
     public override PacketStream Write(PacketStream stream)
     {
-        stream.Write(accountId.Value);
+        // 2.0.1.7 expects an 8-byte ulong account id. AccountId.Value is uint
+        // (4 bytes) on the master branch — writing it raw on this branch
+        // shifts wsk + slotCount by 4 bytes and the client throws a
+        // "Serializer Mismatch" popup right after Connect. Cast explicitly.
+        stream.Write((ulong)accountId.Value);
         stream.Write(_wsk, true);
         stream.Write(slotCount);
 
