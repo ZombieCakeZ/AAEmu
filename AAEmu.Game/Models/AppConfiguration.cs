@@ -40,9 +40,33 @@ public partial class AppConfiguration
     public ClientDataConfig ClientData { get; set; } = new();
     public SpecialtyConfig Specialty { get; set; } = new();
     public ScriptsConfig Scripts { get; set; } = new();
+    public CompatibilityConfig Compatibility { get; set; } = new();
     public string DefaultLanguage { get; set; } = "en_us";
     public bool DebugInfo { get; set; } = true;
     public uint DebugInfoLevel { get; set; } = 100;
+
+    /// <summary>
+    /// Gates 2.0.1.7-specific behaviour on this branch. The fields here are
+    /// read at boot — there is no live-reload semantic. The 1.2 server on the
+    /// master branch ignores this block.
+    /// </summary>
+    public class CompatibilityConfig
+    {
+        /// <summary>Client protocol the server speaks. "1_2" or "2_0_1_7".</summary>
+        public string ProtocolVersion { get; set; } = "2_0_1_7";
+
+        /// <summary>Enable actability (non-combat XP) tracking and packet emission.</summary>
+        public bool EnableActabilities { get; set; } = true;
+
+        /// <summary>Enable mate (companion) state persistence.</summary>
+        public bool EnableMates { get; set; } = true;
+
+        /// <summary>Housing 2.0 decay timer + Patron tax tracking.</summary>
+        public bool EnableHousingDecay { get; set; } = false;
+
+        /// <summary>Specialty / hauling trade-pack ratio tracking.</summary>
+        public bool EnableSpecialtyRatios { get; set; } = true;
+    }
 
     public class NetworkConfig
     {
