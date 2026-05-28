@@ -19,7 +19,7 @@
 	},
 	"Connections": {
 		"MySQLProvider": {
-			"Database": "aaemu_login",
+			"Database": "aaemu_login2",
 			"Host": "%db_host%",
 			"Password": "%db_password%",
 			"Port": "%db_port%",
