@@ -56,7 +56,11 @@ public class ACWorldListPacket(List<GameServer> gameServers, List<LoginCharacter
         {
             foreach (var character in characters)
             {
-                stream.Write(character.AccountId);
+                // LoginCharacterInfo.AccountId is uint (4 bytes) — 2.0.1.7 expects
+                // ulong (8 bytes), same pattern as ACAuthResponsePacket. Cast on the
+                // wire so every following character field stays at the offset the
+                // 2.0 client expects.
+                stream.Write((ulong)character.AccountId);
                 stream.Write(character.GsId);
                 stream.Write(character.Id);
                 stream.Write(character.Name);
