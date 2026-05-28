@@ -44,7 +44,11 @@ public class EnterWorldManager(
             connection.SendPacket(new GLPlayerEnterPacket(connectionId, gsId, 1));
         else
         {
-            _accounts.Add(connectionId, accountId);
+            // Indexer assignment instead of Add() — Add() throws on duplicate keys
+            // and the login server reuses connectionId on reconnect / second
+            // LGPlayerEnterPacket arrival, which crashed the game server during
+            // 2.0.1.7 client testing (server-selection retry path).
+            _accounts[connectionId] = accountId;
             connection.SendPacket(new GLPlayerEnterPacket(connectionId, gsId, 0));
         }
     }
