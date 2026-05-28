@@ -4,7 +4,7 @@ using AAEmu.Game.Core.Network.Game;
 namespace AAEmu.Game.Core.Packets.G2C;
 
 public class SCAccountInfoPacket(int payMethod, int payLocation, DateTime payStart, DateTime payEnd)
-    : GamePacket(SCOffsets.SCAccountInfoPacket, 1)
+    : GamePacket(SCOffsets.SCAccountInfoPacket, 5)
 {
     public override PacketStream Write(PacketStream stream)
     {
@@ -13,6 +13,7 @@ public class SCAccountInfoPacket(int payMethod, int payLocation, DateTime paySta
         stream.Write(payStart);
         stream.Write(payEnd);
         stream.Write((long)0); // realPayTime
+        stream.Write(0); // buyPremiumCount — added in 2.0.1.7
         return stream;
     }
 }

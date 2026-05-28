@@ -31,29 +31,24 @@ public class FinishStatePacket() : GamePacket(PPOffsets.FinishStatePacket, 2)
                 Connection.SendPacket(new SetGameTypePacket(levelname, 0, 1)); // TODO - level
                 Connection.SendPacket(new SCInitialConfigPacket());
 
-                // Test URLs                                          // Original Trion values
-                // Client treats these as folders and will add a trailing slash (/) with whatever it needs
-                // For example, opening the Wiki would send http://localhost/aaemu/platform/login
-                var authUrl = "http://localhost/aaemu/login";         // "https://session.draft.integration.triongames.priv";
-                var platformUrl = "http://localhost/aaemu/platform";  // "http://archeage.draft.integration.triongames.priv/commerce/pruchase/credits/purchase-credits-flow.action";
-                var commerceUrl = "http://localhost/aaemu/shop";      // "" ;
+                // 2.0.1.7 SCTrionConfigPacket layout: (activate, platformUrl, commerceUrl, wikiUrl, csUrl).
+                // authUrl is gone in 2.0.
+                var platformUrl = "http://localhost/aaemu/platform";
+                var commerceUrl = "http://localhost/aaemu/shop";
+                var wikiUrl = "http://localhost/aaemu/wiki";
+                var csUrl = "http://localhost/aaemu/cs";
 
-                // It seems this packet can be ignored if you don't use the wiki/shop
-                Connection.SendPacket(new SCTrionConfigPacket(
-                    true,
-                    authUrl,
-                    platformUrl,
-                    commerceUrl)
-                ); // TODO - config files
+                Connection.SendPacket(new SCTrionConfigPacket(true, platformUrl, commerceUrl, wikiUrl, csUrl));
                 Connection.SendPacket(new SCAccountInfoPacket(
                         (int)Connection.Payment.Method,
                         Connection.Payment.Location,
                         Connection.Payment.StartTime,
                         Connection.Payment.EndTime)
                 );
-                Connection.SendPacket(new SCChatSpamDelayPacket());
-                Connection.SendPacket(new SCAccountAttributeConfigPacket(_scAccountInitPacket)); // TODO
-                Connection.SendPacket(new SCLevelRestrictionConfigPacket(10, 10, 10, 10, 10, _scLevelRestrictionInitPacket)); // TODO - config files
+                // SCChatSpamDelayPacket dropped: its opcode is in the 0xFF00 sentinel
+                // range (1.2-only) and the 2.0 client errors on unknown opcodes.
+                Connection.SendPacket(new SCAccountAttributeConfigPacket(_scAccountInitPacket));
+                Connection.SendPacket(new SCLevelRestrictionConfigPacket(10, 10, 10, 10, 10, _scLevelRestrictionInitPacket));
                 break;
             case 1:
                 Connection.SendPacket(new ChangeStatePacket(2));
