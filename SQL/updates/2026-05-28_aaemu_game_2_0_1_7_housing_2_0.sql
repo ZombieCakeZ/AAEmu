@@ -3,7 +3,7 @@
 -- See Docs/Schema_Delta_1_2_vs_2_0_1_7.md.
 
 ALTER TABLE `housings`
-    ADD COLUMN `decay_started_at`    DATETIME NULL              AFTER `taxation_id`,
+    ADD COLUMN `decay_started_at`    DATETIME NULL              AFTER `allow_recover`,
     ADD COLUMN `grace_period_until`  DATETIME NULL              AFTER `decay_started_at`,
     ADD COLUMN `demolish_pending`    TINYINT  NOT NULL DEFAULT 0 AFTER `grace_period_until`,
     ADD COLUMN `patron_status`       TINYINT  NOT NULL DEFAULT 0 AFTER `demolish_pending`;
