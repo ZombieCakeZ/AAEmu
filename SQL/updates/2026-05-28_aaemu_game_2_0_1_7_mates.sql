@@ -20,14 +20,17 @@ CREATE TABLE IF NOT EXISTS `mates` (
     KEY `idx_mates_owner` (`owner_character_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
+-- No FK to mates(id) either. The previous attempt may have left a half
+-- mate_equipment table behind from a failed CREATE+FK pass; ALTER TABLE
+-- DROP FOREIGN KEY is needed to recover such state, and IF NOT EXISTS
+-- below would silently skip the new definition. Keeping the migration
+-- FK-free makes re-running safe regardless of the partial state.
+-- MateManager is responsible for sweeping orphaned mate_equipment rows
+-- when a mate is deleted.
 CREATE TABLE IF NOT EXISTS `mate_equipment` (
     `mate_id`    BIGINT UNSIGNED NOT NULL,
     `slot`       TINYINT UNSIGNED NOT NULL,
     `item_id`    BIGINT UNSIGNED NULL,
     `expires_at` DATETIME NULL,
-    PRIMARY KEY (`mate_id`, `slot`),
-    CONSTRAINT `fk_mate_equipment_mate`
-        FOREIGN KEY (`mate_id`)
-        REFERENCES `mates` (`id`)
-        ON DELETE CASCADE
+    PRIMARY KEY (`mate_id`, `slot`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
