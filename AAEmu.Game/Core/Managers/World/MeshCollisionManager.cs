@@ -347,7 +347,17 @@ public class MeshCollisionManager : Singleton<MeshCollisionManager>, ILoadable
         return ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
     }
 
-    // -------- Read-side query helpers (Phase 3 wires AI into these) ----------
+    public bool IsLoaded => _loaded;
+
+    // ===== Phase 3 — query API (BVH-accelerated where available) =============
+
+    [Flags]
+    public enum MeshQueryFlags
+    {
+        None = 0,
+        /// <summary>Reject triangles whose ALL vertices sit above CollisionMesh.TrunkCutoffLocalZ on IsTree meshes.</summary>
+        SkipFoliage = 1 << 0,
+    }
 
     /// <summary>All instances overlapping the requested 64m region (plus the overlay for very large instances).</summary>
     public IReadOnlyList<CollisionMeshInstance> GetInstancesInRegion(string worldName, int rx, int ry)
@@ -359,6 +369,382 @@ public class MeshCollisionManager : Singleton<MeshCollisionManager>, ILoadable
             result.AddRange(overlay);
         return result;
     }
+
+    /// <summary>
+    /// Returns true if the segment from→to is blocked by any loaded mesh triangle in this world.
+    /// Walks the 64m region grid along the segment XY footprint + the large-instance overlay, then
+    /// per instance either traverses the BVH (when the editor populated it) or scans all triangles.
+    /// </summary>
+    public bool IsLineBlockedByMesh(string worldName, Vector3 from, Vector3 to, MeshQueryFlags flags = MeshQueryFlags.SkipFoliage)
+    {
+        if (!_loaded) return false;
+        if (!_spatialIndex.TryGetValue(worldName, out var index)) return false;
+
+        var minRx = (int)MathF.Floor(MathF.Min(from.X, to.X) / RegionSize);
+        var maxRx = (int)MathF.Floor(MathF.Max(from.X, to.X) / RegionSize);
+        var minRy = (int)MathF.Floor(MathF.Min(from.Y, to.Y) / RegionSize);
+        var maxRy = (int)MathF.Floor(MathF.Max(from.Y, to.Y) / RegionSize);
+        var segMinX = MathF.Min(from.X, to.X);
+        var segMaxX = MathF.Max(from.X, to.X);
+        var segMinY = MathF.Min(from.Y, to.Y);
+        var segMaxY = MathF.Max(from.Y, to.Y);
+        var segMinZ = MathF.Min(from.Z, to.Z);
+        var segMaxZ = MathF.Max(from.Z, to.Z);
+
+        // Dedup instances that straddle multiple region cells.
+        var seen = new HashSet<CollisionMeshInstance>();
+
+        for (var ry = minRy; ry <= maxRy; ry++)
+        {
+            for (var rx = minRx; rx <= maxRx; rx++)
+            {
+                if (!index.TryGetValue((rx, ry), out var bucket)) continue;
+                foreach (var inst in bucket)
+                {
+                    if (!seen.Add(inst)) continue;
+                    if (RejectByWorldBounds(inst, segMinX, segMinY, segMaxX, segMaxY, segMinZ, segMaxZ)) continue;
+                    if (InstanceBlocksSegment(inst, from, to, flags)) return true;
+                }
+            }
+        }
+
+        if (_largeInstances.TryGetValue(worldName, out var overlay))
+        {
+            foreach (var inst in overlay)
+            {
+                if (!seen.Add(inst)) continue;
+                if (RejectByWorldBounds(inst, segMinX, segMinY, segMaxX, segMaxY, segMinZ, segMaxZ)) continue;
+                if (InstanceBlocksSegment(inst, from, to, flags)) return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Highest mesh-surface Z at (x,y) within ±verticalSearch of probeZ in worldName, or null
+    /// when no mesh surface intersects the search slab. Used by GetReferenceHeight so NPCs
+    /// can stand on rooftops/bridges that have no hand-authored floor volume.
+    /// </summary>
+    public float? QueryFloorHeight(string worldName, float x, float y, float probeZ, float verticalSearch = 6f)
+    {
+        if (!_loaded) return null;
+        if (!_spatialIndex.TryGetValue(worldName, out var index)) return null;
+
+        var rx = (int)MathF.Floor(x / RegionSize);
+        var ry = (int)MathF.Floor(y / RegionSize);
+        var slabMin = probeZ - verticalSearch;
+        var slabMax = probeZ + verticalSearch;
+
+        // Downward ray from (x,y, slabMax) length 2*verticalSearch.
+        var origin = new Vector3(x, y, slabMax);
+        var dir = new Vector3(0f, 0f, -1f);
+        var maxT = slabMax - slabMin; // ray param length
+
+        float? best = null;
+        if (index.TryGetValue((rx, ry), out var bucket))
+            best = SamplePointInBucket(bucket, origin, dir, x, y, slabMin, slabMax, maxT, best);
+        if (_largeInstances.TryGetValue(worldName, out var overlay))
+            best = SamplePointInBucket(overlay, origin, dir, x, y, slabMin, slabMax, maxT, best);
+
+        return best;
+    }
+
+    /// <summary>Inside-mesh parity test via upward-ray triangle crossings — debug/admin only, no BVH speed-up.</summary>
+    public bool PointInMesh(string worldName, float x, float y, float z)
+    {
+        if (!_loaded) return false;
+        if (!_spatialIndex.TryGetValue(worldName, out var index)) return false;
+
+        var rx = (int)MathF.Floor(x / RegionSize);
+        var ry = (int)MathF.Floor(y / RegionSize);
+        if (!index.TryGetValue((rx, ry), out var bucket)) return false;
+
+        var origin = new Vector3(x, y, z);
+        var dir = new Vector3(0f, 0f, 1f);
+        foreach (var inst in bucket)
+        {
+            if (z < inst.WorldMinZ || z > inst.WorldMaxZ) continue;
+            var (mnx, mny, mxx, mxy) = inst.WorldBounds;
+            if (x < mnx || x > mxx || y < mny || y > mxy) continue;
+            var crossings = CountTriangleCrossings(inst, origin, dir, 0f, float.MaxValue);
+            if ((crossings & 1) == 1) return true;
+        }
+        return false;
+    }
+
+    // ===== Internal traversal ================================================
+
+    private static bool RejectByWorldBounds(CollisionMeshInstance inst,
+        float segMinX, float segMinY, float segMaxX, float segMaxY, float segMinZ, float segMaxZ)
+    {
+        var (mnx, mny, mxx, mxy) = inst.WorldBounds;
+        if (segMaxX < mnx || segMinX > mxx) return true;
+        if (segMaxY < mny || segMinY > mxy) return true;
+        if (segMaxZ < inst.WorldMinZ || segMinZ > inst.WorldMaxZ) return true;
+        return false;
+    }
+
+    private static float? SamplePointInBucket(IReadOnlyList<CollisionMeshInstance> bucket,
+        Vector3 origin, Vector3 dir, float x, float y, float slabMin, float slabMax, float maxT, float? best)
+    {
+        foreach (var inst in bucket)
+        {
+            if (inst.WorldMaxZ < slabMin || inst.WorldMinZ > slabMax) continue;
+            var (mnx, mny, mxx, mxy) = inst.WorldBounds;
+            if (x < mnx || x > mxx || y < mny || y > mxy) continue;
+
+            var hitT = FirstRayHit(inst, origin, dir, 0f, maxT, MeshQueryFlags.None);
+            if (!hitT.HasValue) continue;
+
+            var hitZ = origin.Z + dir.Z * hitT.Value;
+            if (hitZ < slabMin || hitZ > slabMax) continue;
+            if (!best.HasValue || hitZ > best.Value) best = hitZ;
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// Tests whether the world-space segment from→to is blocked by any triangle of this instance.
+    /// Uses the per-template BVH when present (built by the editor), falls back to a linear scan
+    /// otherwise. The query is transformed into the mesh's local space once and the rest is local.
+    /// </summary>
+    private static bool InstanceBlocksSegment(CollisionMeshInstance inst, Vector3 from, Vector3 to, MeshQueryFlags flags)
+    {
+        var fromLocal = WorldToLocal(inst, from);
+        var toLocal = WorldToLocal(inst, to);
+        var dir = toLocal - fromLocal;
+        var skipFoliage = (flags & MeshQueryFlags.SkipFoliage) != 0 && inst.Mesh.IsTree;
+        var trunkCutoff = inst.Mesh.TrunkCutoffLocalZ;
+
+        if (inst.Mesh.BvhNodes.Length > 0)
+            return BvhAnyHit(inst.Mesh, fromLocal, dir, skipFoliage, trunkCutoff, 0f, 1f);
+
+        return LinearAnyHit(inst.Mesh, fromLocal, dir, skipFoliage, trunkCutoff, 0f, 1f);
+    }
+
+    private static float? FirstRayHit(CollisionMeshInstance inst, Vector3 origin, Vector3 dir, float tMin, float tMax, MeshQueryFlags flags)
+    {
+        var originLocal = WorldToLocal(inst, origin);
+        var dirLocal = WorldToLocalDir(inst, dir);
+        var skipFoliage = (flags & MeshQueryFlags.SkipFoliage) != 0 && inst.Mesh.IsTree;
+        var trunkCutoff = inst.Mesh.TrunkCutoffLocalZ;
+
+        if (inst.Mesh.BvhNodes.Length > 0)
+            return BvhFirstHit(inst.Mesh, originLocal, dirLocal, skipFoliage, trunkCutoff, tMin, tMax);
+
+        return LinearFirstHit(inst.Mesh, originLocal, dirLocal, skipFoliage, trunkCutoff, tMin, tMax);
+    }
+
+    private static int CountTriangleCrossings(CollisionMeshInstance inst, Vector3 origin, Vector3 dir, float tMin, float tMax)
+    {
+        var originLocal = WorldToLocal(inst, origin);
+        var dirLocal = WorldToLocalDir(inst, dir);
+        var verts = inst.Mesh.Vertices;
+        var idx = inst.Mesh.Indices;
+        var crossings = 0;
+        var triCount = idx.Length / 3;
+        for (var t = 0; t < triCount; t++)
+        {
+            var v0 = ReadVertex(verts, idx[t * 3]);
+            var v1 = ReadVertex(verts, idx[t * 3 + 1]);
+            var v2 = ReadVertex(verts, idx[t * 3 + 2]);
+            if (RayTriangle(originLocal, dirLocal, v0, v1, v2, tMin, tMax, out _)) crossings++;
+        }
+        return crossings;
+    }
+
+    private static bool BvhAnyHit(CollisionMesh mesh, Vector3 origin, Vector3 dir,
+        bool skipFoliage, float trunkCutoff, float tMin, float tMax)
+    {
+        var nodes = mesh.BvhNodes;
+        Span<int> stack = stackalloc int[64];
+        var sp = 0;
+        stack[sp++] = 0;
+
+        var invDir = new Vector3(
+            dir.X == 0 ? float.PositiveInfinity : 1f / dir.X,
+            dir.Y == 0 ? float.PositiveInfinity : 1f / dir.Y,
+            dir.Z == 0 ? float.PositiveInfinity : 1f / dir.Z);
+
+        while (sp > 0)
+        {
+            var n = nodes[stack[--sp]];
+            if (!RaySlab(origin, invDir, n.Min, n.Max, tMin, tMax)) continue;
+            if (skipFoliage && n.Min.Z > trunkCutoff) continue;
+
+            if (n.IsLeaf)
+            {
+                if (LinearAnyHitRange(mesh, origin, dir, skipFoliage, trunkCutoff, tMin, tMax, n.FirstTri, n.TriCount))
+                    return true;
+            }
+            else
+            {
+                if (sp < stack.Length) stack[sp++] = n.LeftOrFirstTri;
+                if (sp < stack.Length) stack[sp++] = n.RightOrTriCount;
+            }
+        }
+        return false;
+    }
+
+    private static float? BvhFirstHit(CollisionMesh mesh, Vector3 origin, Vector3 dir,
+        bool skipFoliage, float trunkCutoff, float tMin, float tMax)
+    {
+        var nodes = mesh.BvhNodes;
+        Span<int> stack = stackalloc int[64];
+        var sp = 0;
+        stack[sp++] = 0;
+
+        var invDir = new Vector3(
+            dir.X == 0 ? float.PositiveInfinity : 1f / dir.X,
+            dir.Y == 0 ? float.PositiveInfinity : 1f / dir.Y,
+            dir.Z == 0 ? float.PositiveInfinity : 1f / dir.Z);
+
+        float? best = null;
+        while (sp > 0)
+        {
+            var n = nodes[stack[--sp]];
+            if (!RaySlab(origin, invDir, n.Min, n.Max, tMin, tMax)) continue;
+            if (skipFoliage && n.Min.Z > trunkCutoff) continue;
+
+            if (n.IsLeaf)
+            {
+                var hit = LinearFirstHitRange(mesh, origin, dir, skipFoliage, trunkCutoff, tMin, tMax, n.FirstTri, n.TriCount);
+                if (hit.HasValue && (!best.HasValue || hit.Value < best.Value)) best = hit;
+            }
+            else
+            {
+                if (sp < stack.Length) stack[sp++] = n.LeftOrFirstTri;
+                if (sp < stack.Length) stack[sp++] = n.RightOrTriCount;
+            }
+        }
+        return best;
+    }
+
+    private static bool LinearAnyHit(CollisionMesh mesh, Vector3 origin, Vector3 dir,
+        bool skipFoliage, float trunkCutoff, float tMin, float tMax)
+        => LinearAnyHitRange(mesh, origin, dir, skipFoliage, trunkCutoff, tMin, tMax, 0, mesh.Indices.Length / 3);
+
+    private static float? LinearFirstHit(CollisionMesh mesh, Vector3 origin, Vector3 dir,
+        bool skipFoliage, float trunkCutoff, float tMin, float tMax)
+        => LinearFirstHitRange(mesh, origin, dir, skipFoliage, trunkCutoff, tMin, tMax, 0, mesh.Indices.Length / 3);
+
+    private static bool LinearAnyHitRange(CollisionMesh mesh, Vector3 origin, Vector3 dir,
+        bool skipFoliage, float trunkCutoff, float tMin, float tMax, int firstTri, int triCount)
+    {
+        var verts = mesh.Vertices;
+        var idx = mesh.Indices;
+        var end = firstTri + triCount;
+        for (var t = firstTri; t < end; t++)
+        {
+            var i0 = idx[t * 3];
+            var i1 = idx[t * 3 + 1];
+            var i2 = idx[t * 3 + 2];
+            if (skipFoliage &&
+                verts[i0 * 3 + 2] > trunkCutoff &&
+                verts[i1 * 3 + 2] > trunkCutoff &&
+                verts[i2 * 3 + 2] > trunkCutoff) continue;
+            var v0 = ReadVertex(verts, i0);
+            var v1 = ReadVertex(verts, i1);
+            var v2 = ReadVertex(verts, i2);
+            if (RayTriangle(origin, dir, v0, v1, v2, tMin, tMax, out _)) return true;
+        }
+        return false;
+    }
+
+    private static float? LinearFirstHitRange(CollisionMesh mesh, Vector3 origin, Vector3 dir,
+        bool skipFoliage, float trunkCutoff, float tMin, float tMax, int firstTri, int triCount)
+    {
+        var verts = mesh.Vertices;
+        var idx = mesh.Indices;
+        var end = firstTri + triCount;
+        float? best = null;
+        for (var t = firstTri; t < end; t++)
+        {
+            var i0 = idx[t * 3];
+            var i1 = idx[t * 3 + 1];
+            var i2 = idx[t * 3 + 2];
+            if (skipFoliage &&
+                verts[i0 * 3 + 2] > trunkCutoff &&
+                verts[i1 * 3 + 2] > trunkCutoff &&
+                verts[i2 * 3 + 2] > trunkCutoff) continue;
+            var v0 = ReadVertex(verts, i0);
+            var v1 = ReadVertex(verts, i1);
+            var v2 = ReadVertex(verts, i2);
+            if (RayTriangle(origin, dir, v0, v1, v2, tMin, tMax, out var hitT))
+            {
+                if (!best.HasValue || hitT < best.Value) best = hitT;
+            }
+        }
+        return best;
+    }
+
+    /// <summary>Möller-Trumbore ray-triangle. Backface-cull OFF (CGF triangles aren't guaranteed CCW).</summary>
+    private static bool RayTriangle(Vector3 origin, Vector3 dir, Vector3 v0, Vector3 v1, Vector3 v2,
+        float tMin, float tMax, out float t)
+    {
+        t = 0f;
+        var edge1 = v1 - v0;
+        var edge2 = v2 - v0;
+        var h = Vector3.Cross(dir, edge2);
+        var det = Vector3.Dot(edge1, h);
+        if (MathF.Abs(det) < 1e-7f) return false;
+        var invDet = 1f / det;
+        var s = origin - v0;
+        var u = Vector3.Dot(s, h) * invDet;
+        if (u < 0f || u > 1f) return false;
+        var q = Vector3.Cross(s, edge1);
+        var v = Vector3.Dot(dir, q) * invDet;
+        if (v < 0f || u + v > 1f) return false;
+        var hitT = Vector3.Dot(edge2, q) * invDet;
+        if (hitT < tMin || hitT > tMax) return false;
+        t = hitT;
+        return true;
+    }
+
+    /// <summary>Ray-vs-AABB slab test (uses 1/dir to avoid per-call division).</summary>
+    private static bool RaySlab(Vector3 origin, Vector3 invDir, Vector3 min, Vector3 max, float tMin, float tMax)
+    {
+        var tx1 = (min.X - origin.X) * invDir.X;
+        var tx2 = (max.X - origin.X) * invDir.X;
+        tMin = MathF.Max(tMin, MathF.Min(tx1, tx2));
+        tMax = MathF.Min(tMax, MathF.Max(tx1, tx2));
+        var ty1 = (min.Y - origin.Y) * invDir.Y;
+        var ty2 = (max.Y - origin.Y) * invDir.Y;
+        tMin = MathF.Max(tMin, MathF.Min(ty1, ty2));
+        tMax = MathF.Min(tMax, MathF.Max(ty1, ty2));
+        var tz1 = (min.Z - origin.Z) * invDir.Z;
+        var tz2 = (max.Z - origin.Z) * invDir.Z;
+        tMin = MathF.Max(tMin, MathF.Min(tz1, tz2));
+        tMax = MathF.Min(tMax, MathF.Max(tz1, tz2));
+        return tMax >= MathF.Max(tMin, 0f);
+    }
+
+    /// <summary>
+    /// Inverse of CollisionMeshInstance.TransformVertex — maps a world point into local-mesh space.
+    /// R is orthonormal in XY (rotation by yaw + uniform XY scale 1), so transpose suffices for the inverse.
+    /// </summary>
+    private static Vector3 WorldToLocal(CollisionMeshInstance inst, Vector3 world)
+    {
+        var dx = world.X - inst.Position.X;
+        var dy = world.Y - inst.Position.Y;
+        var lx = inst.R00 * dx + inst.R10 * dy;
+        var ly = inst.R01 * dx + inst.R11 * dy;
+        var lz = inst.Scale != 0f ? (world.Z - inst.Position.Z) / inst.Scale : 0f;
+        return new Vector3(lx, ly, lz);
+    }
+
+    /// <summary>Like WorldToLocal but for a direction vector (no translation).</summary>
+    private static Vector3 WorldToLocalDir(CollisionMeshInstance inst, Vector3 dir)
+    {
+        var lx = inst.R00 * dir.X + inst.R10 * dir.Y;
+        var ly = inst.R01 * dir.X + inst.R11 * dir.Y;
+        var lz = inst.Scale != 0f ? dir.Z / inst.Scale : 0f;
+        return new Vector3(lx, ly, lz);
+    }
+
+    private static Vector3 ReadVertex(float[] verts, int vIdx)
+        => new(verts[vIdx * 3], verts[vIdx * 3 + 1], verts[vIdx * 3 + 2]);
 
     // -------- /meshstats consumed surface -----------------------------------
 

@@ -7,6 +7,7 @@ using System.Numerics;
 
 using AAEmu.Commons.IO;
 using AAEmu.Commons.Utils;
+using AAEmu.Game.Models;
 using AAEmu.Game.Models.Game.World;
 using AAEmu.Game.Utils;
 
@@ -453,6 +454,22 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
     /// <returns>True if the movement crosses a wall and should be blocked</returns>
     public bool IsBlockedByWall(string worldName, float fromX, float fromY, float toX, float toY, float z)
     {
+        // Phase 3 — mesh fallthrough (no-op when flag off). Runs BEFORE the volume spatial-index
+        // guard so mesh blocking works in worlds that have no /cv wall volumes at all. Eye height
+        // at z+1m approximates NPC chest height so a 1m wall blocks LOS like the polygon test.
+        if (AppConfiguration.Instance.World.UseMeshLineOfSight)
+        {
+            var meshFlags = AppConfiguration.Instance.World.MeshLosSkipFoliage
+                ? MeshCollisionManager.MeshQueryFlags.SkipFoliage
+                : MeshCollisionManager.MeshQueryFlags.None;
+            if (MeshCollisionManager.Instance.IsLineBlockedByMesh(
+                    worldName,
+                    new Vector3(fromX, fromY, z + 1.0f),
+                    new Vector3(toX, toY, z + 1.0f),
+                    meshFlags))
+                return true;
+        }
+
         if (!_spatialIndex.TryGetValue(worldName, out var index))
             return false;
 

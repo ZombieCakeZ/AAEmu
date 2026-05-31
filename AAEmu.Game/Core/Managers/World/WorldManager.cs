@@ -917,6 +917,17 @@ public class WorldManager(
                 return activeGrid.Value;
         }
 
+        // 3b-mesh. Phase 3 — sample loaded collision meshes (rooftops / bridges / ship decks)
+        // BEFORE the generic /cv floor lookup. CGF geometry is more precise than hand-authored
+        // volumes, but still loses to explicit bindings (3a) and grid-bound NPCs (3b) above.
+        if (AppConfiguration.Instance.World.UseMeshFloorHeight && AppConfiguration.Instance.World.UseMeshLineOfSight)
+        {
+            var npcZ = ai.Owner.Transform.Local.Position.Z;
+            var meshFloor = MeshCollisionManager.Instance.QueryFloorHeight(worldName, x, y, npcZ, 6.0f);
+            if (meshFloor.HasValue)
+                return meshFloor.Value;
+        }
+
         // 3c. Generic floor volume lookup (any NPC on a building's collision floor).
         var floorHeight = cvMgr.GetFloorHeight(worldName, x, y, z);
         if (floorHeight.HasValue)

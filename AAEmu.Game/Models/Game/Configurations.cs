@@ -138,6 +138,33 @@ public class WorldConfig
     /// Configure in <c>AAEmu.Game/Configurations/World.json</c> under <c>World.UsePersistentHouseDoodads</c>.
     /// </summary>
     public bool UsePersistentHouseDoodads { get; set; } = false;
+
+    /// <summary>
+    /// Phase-3 master switch for MeshCollisionManager queries. When true, <see cref="bool"/>-returning
+    /// callers (CollisionVolumeManager.IsBlockedByWall, BaseUnit.CanSeeTarget) additionally consult
+    /// the editor-baked CGF triangle meshes loaded from <c>Data/CollisionMeshes/</c>. When false,
+    /// behaviour is byte-identical to pre-Phase-3 (no mesh query runs, no perf cost).
+    /// Default: false — opt-in per server.
+    /// </summary>
+    public bool UseMeshLineOfSight { get; set; } = false;
+
+    /// <summary>
+    /// When true, <see cref="WorldManager.GetReferenceHeight"/> samples loaded collision meshes
+    /// (rooftops, bridges, ship decks) AHEAD of the existing CollisionVolume floor lookup. Lets
+    /// NPCs walk on top of buildings that have no hand-authored <c>/cv floor</c> volume.
+    /// Requires <see cref="UseMeshLineOfSight"/>=true to take effect (shares the same spatial index).
+    /// Default: false.
+    /// </summary>
+    public bool UseMeshFloorHeight { get; set; } = false;
+
+    /// <summary>
+    /// When true, tree canopy triangles (above <see cref="CollisionMesh.TrunkCutoffLocalZ"/> on
+    /// IsTree meshes) are SKIPPED during AI line-of-sight raycasts. Only trunks block sight,
+    /// so NPCs don't lose aggro to harmless foliage above the player's head. Affects
+    /// <see cref="BaseUnit.CanSeeTarget"/> and <see cref="CollisionVolumeManager.IsBlockedByWall"/>
+    /// when <see cref="UseMeshLineOfSight"/> is on. Default: true.
+    /// </summary>
+    public bool MeshLosSkipFoliage { get; set; } = true;
 }
 
 public class DungeonLoadConfig

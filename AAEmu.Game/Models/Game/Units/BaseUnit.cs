@@ -135,6 +135,24 @@ public class BaseUnit : GameObject, IBaseUnit
         if (!target.IsVisible)
             return false;
 
+        // Phase 3 — geometric line-of-sight through baked CGF meshes. Gated behind
+        // World.UseMeshLineOfSight (default false). Eye height +1.6m on both ends so a
+        // 2m wall between two NPCs at floor level blocks sight without false positives
+        // from sub-knee terrain noise. Stealth still wins after geometric LOS passes.
+        if (AppConfiguration.Instance.World.UseMeshLineOfSight)
+        {
+            var fromPos = Transform.World.Position;
+            var toPos = target.Transform.World.Position;
+            var eyeFrom = new System.Numerics.Vector3(fromPos.X, fromPos.Y, fromPos.Z + 1.6f);
+            var eyeTo = new System.Numerics.Vector3(toPos.X, toPos.Y, toPos.Z + 1.6f);
+            var skip = AppConfiguration.Instance.World.MeshLosSkipFoliage
+                ? MeshCollisionManager.MeshQueryFlags.SkipFoliage
+                : MeshCollisionManager.MeshQueryFlags.None;
+            var worldName = CollisionVolumeManager.GetWorldNameFromId(Transform.WorldId);
+            if (MeshCollisionManager.Instance.IsLineBlockedByMesh(worldName, eyeFrom, eyeTo, skip))
+                return false;
+        }
+
         return !target.Buffs.CheckBuffTag((uint)TagsEnum.Stealth);
     }
 
