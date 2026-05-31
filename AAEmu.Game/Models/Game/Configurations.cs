@@ -165,6 +165,18 @@ public class WorldConfig
     /// when <see cref="UseMeshLineOfSight"/> is on. Default: true.
     /// </summary>
     public bool MeshLosSkipFoliage { get; set; } = true;
+
+    /// <summary>
+    /// Phase-6 master switch for DotRecast NavMesh pathfinding. When true,
+    /// <see cref="CollisionVolumeManager.FindWallPath"/> first asks
+    /// <c>NavMeshManager.FindPath</c> for a route over the editor-baked navmesh and only
+    /// falls back to the legacy A* GridPathfinder if the navmesh returns empty (e.g. start
+    /// or end off the mesh, or world has no .navmesh file yet). When false, GridPathfinder
+    /// is used unconditionally — preserves pre-Phase-6 behaviour byte-identical.
+    /// Default: false. Requires Data/NavMesh/&lt;world&gt;.navmesh produced by AAEditor.Sandbox
+    /// --bake-navmesh.
+    /// </summary>
+    public bool UseNavMesh { get; set; } = false;
 }
 
 public class DungeonLoadConfig

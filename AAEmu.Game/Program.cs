@@ -278,6 +278,7 @@ public static class Program
 
                 services.AddSingleton<CollisionVolumeManager>();
                 services.AddSingleton<MeshCollisionManager>();
+                services.AddSingleton<NavMeshManager>();
 
                 services.AddSingleton<EnterWorldManager>();
                 services.AddSingleton<IEnterWorldManager>(sp => sp.GetRequiredService<EnterWorldManager>());

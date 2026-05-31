@@ -23,6 +23,7 @@
         "TagShareEnabled": false,
         "UseMeshLineOfSight": false,
         "UseMeshFloorHeight": false,
-        "MeshLosSkipFoliage": true
+        "MeshLosSkipFoliage": true,
+        "UseNavMesh": false
     }
 }

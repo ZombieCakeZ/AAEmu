@@ -437,6 +437,15 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
     public List<System.Numerics.Vector3> FindWallPath(string worldName,
         System.Numerics.Vector3 start, System.Numerics.Vector3 target, float z)
     {
+        // Phase 6 — navmesh first when configured + baked. The Phase-1..5 GridPathfinder fallback
+        // catches worlds without a .navmesh on disk, off-mesh starts/ends, and the legacy code path
+        // when the flag is off (default), so behaviour stays identical when no navmesh exists.
+        if (AppConfiguration.Instance.World.UseNavMesh && NavMeshManager.Instance.EnsureLoaded(worldName))
+        {
+            var navPath = NavMeshManager.Instance.FindPath(worldName, start, target);
+            if (navPath != null && navPath.Count > 1)
+                return navPath;
+        }
         return GridPathfinder.FindPath(worldName, start, target, z);
     }
 
