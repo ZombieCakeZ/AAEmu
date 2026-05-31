@@ -1,6 +1,27 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace AAEmu.Game.Models.Game.World;
+
+/// <summary>
+/// BVH node — byte-exact mirror of the editor's BvhBuilder.BvhNode and the layout
+/// written by AAEditor.Core.Collision.MeshCacheWriter (32 bytes, little-endian).
+///
+/// Leaf marker: RightOrTriCount &lt; 0 — TriCount = -RightOrTriCount, FirstTri = LeftOrFirstTri.
+/// Internal:    LeftOrFirstTri = left child node index, RightOrTriCount = right child node index.
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct BvhNode
+{
+    public Vector3 Min;
+    public Vector3 Max;
+    public int LeftOrFirstTri;
+    public int RightOrTriCount;
+
+    public bool IsLeaf => RightOrTriCount < 0;
+    public int FirstTri => LeftOrFirstTri;
+    public int TriCount => -RightOrTriCount;
+}
 
 /// <summary>
 /// A collision mesh loaded from a binary .mesh file (extracted from CGF by PakExplorer).
@@ -51,6 +72,22 @@ public class CollisionMesh
     /// Computed as LocalMin.Z + (LocalMax.Z - LocalMin.Z) * 0.30 (bottom 30%).
     /// </summary>
     public float TrunkCutoffLocalZ { get; set; }
+
+    /// <summary>
+    /// FNV-1a 64-bit hash of the normalized lowercase CGF path. Mirrors
+    /// AAEditor.Core.Collision.MeshCacheWriter.Fnv1a64(NormalizePath(...)) — the lookup
+    /// key used by MeshCollisionManager._templatesByHash and by per-instance "h" entries.
+    /// </summary>
+    public ulong PathHash { get; set; }
+
+    /// <summary>
+    /// Bounding Volume Hierarchy over Indices (already BVH-reordered by the editor).
+    /// Root is node 0. Leaf nodes (RightOrTriCount &lt; 0) reference FirstTri..FirstTri+TriCount-1
+    /// triangle slots in the Indices array. Empty when the source mesh has zero triangles or
+    /// when loaded from a legacy file without a BVH chunk — consumers fall back to a linear
+    /// triangle scan when BvhNodes.Length == 0.
+    /// </summary>
+    public BvhNode[] BvhNodes { get; set; } = [];
 
     /// <summary>
     /// Number of vertices (Vertices.Length / 3)
