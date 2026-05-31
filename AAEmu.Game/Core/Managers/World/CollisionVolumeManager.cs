@@ -452,13 +452,12 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
     /// <param name="toY">Destination Y</param>
     /// <param name="z">NPC's Z position (feet)</param>
     /// <returns>True if the movement crosses a wall and should be blocked</returns>
-    public bool IsBlockedByWall(string worldName, float fromX, float fromY, float toX, float toY, float z)
+    public bool IsBlockedByWall(string worldName, float fromX, float fromY, float toX, float toY,
+        float footZ, float npcHeight = 2.0f)
     {
-        // Phase 3 — mesh fallthrough (no-op when flag off). Runs BEFORE the volume spatial-index
-        // guard so mesh blocking works in worlds that have no /cv wall volumes at all. Eye height
-        // at z+1m approximates NPC chest height; bodyRadius 0.45m matches the MoveTowards body-buf
-        // (0.3m offset on each side, plus 0.15m margin for wall thickness) — fixes Phase-3 NPCs
-        // half-clipping into walls because the thin centerline test missed their torso.
+        // Phase 5 — mesh fallthrough now passes the NPC's foot Z + height so IsLineBlockedByMesh
+        // can capsule-sample low parapets (Z [foot..foot+0.8]) AND elevated railings (Z
+        // [foot+1..foot+2.5]) — the previous z+1m fixed eye height missed both classes.
         if (AppConfiguration.Instance.World.UseMeshLineOfSight)
         {
             var meshFlags = AppConfiguration.Instance.World.MeshLosSkipFoliage
@@ -466,10 +465,11 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
                 : MeshCollisionManager.MeshQueryFlags.None;
             if (MeshCollisionManager.Instance.IsLineBlockedByMesh(
                     worldName,
-                    new Vector3(fromX, fromY, z + 1.0f),
-                    new Vector3(toX, toY, z + 1.0f),
+                    new Vector3(fromX, fromY, footZ),
+                    new Vector3(toX, toY, footZ),
                     meshFlags,
-                    bodyRadius: 0.45f))
+                    bodyRadius: 0.45f,
+                    npcHeight: npcHeight))
                 return true;
         }
 
@@ -500,7 +500,7 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
                     if (vol.VolumeType != CollisionVolumeType.Wall)
                         continue;
 
-                    if (IsMovementBlockedByWall(vol, fromX, fromY, toX, toY, z))
+                    if (IsMovementBlockedByWall(vol, fromX, fromY, toX, toY, footZ, npcHeight))
                         return true;
                 }
             }
@@ -513,7 +513,8 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
     /// Test if a specific movement line crosses a wall volume.
     /// A wall is a series of connected line segments (open path) with a height.
     /// </summary>
-    private static bool IsMovementBlockedByWall(CollisionVolume wall, float fromX, float fromY, float toX, float toY, float z)
+    private static bool IsMovementBlockedByWall(CollisionVolume wall, float fromX, float fromY, float toX, float toY,
+        float footZ, float npcHeight)
     {
         if (wall.Vertices == null || wall.Vertices.Count < 2)
             return false;
@@ -528,21 +529,28 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
             moveMaxY < wall.BoundingBox.MinY || moveMinY > wall.BoundingBox.MaxY)
             return false;
 
+        // Phase 5: NPC vertical extent [footZ - 0.5m, footZ + npcHeight]. 0.5m below the feet
+        // tolerates terrain-vs-wall elevation mismatches; the top reaches the head.
+        var npcMinZ = footZ - 0.5f;
+        var npcMaxZ = footZ + npcHeight;
+
         // Check each wall segment
         for (var i = 0; i < wall.Vertices.Count - 1; i++)
         {
             var a = wall.Vertices[i];
             var b = wall.Vertices[i + 1];
 
-            // Z range check: the wall extends from the lower vertex Z up to Z + WallHeight.
-            // The bottom extends 0.5m below the lowest vertex to handle height differences
-            // (e.g., NPC approaching a wall from slightly below the recorded elevation).
+            // Wall extends from the lower vertex Z up to Z + WallHeight.
             var segBaseZ = MathF.Min(a.Z, b.Z);
             var segTopZ = MathF.Max(a.Z, b.Z) + wall.WallHeight;
 
-            // NPC must be within the wall's vertical range to be blocked
-            // (NPC Z is at feet level; extend downward 0.5m for terrain height mismatches)
-            if (z < segBaseZ - 0.5f || z > segTopZ)
+            // Phase 5 — interval overlap instead of point-in-window. Old test was
+            //   if (footZ < segBaseZ - 0.5f || footZ > segTopZ) continue;
+            // which silently missed elevated railings (Z [101..102.5] vs NPC foot Z=100):
+            // foot was below segBaseZ-0.5 so the wall was skipped even though the NPC's
+            // torso would hit it. The interval test asks instead "do the NPC's vertical
+            // extent and the wall's vertical extent overlap at all?".
+            if (segTopZ < npcMinZ || segBaseZ > npcMaxZ)
                 continue;
 
             // 2D line segment intersection test

@@ -373,15 +373,36 @@ public class MeshCollisionManager : Singleton<MeshCollisionManager>, ILoadable
     /// <summary>
     /// Returns true if the segment from→to is blocked by any loaded mesh triangle in this world.
     /// When <paramref name="bodyRadius"/> > 0, also runs two parallel offset segments at
-    /// ±radius perpendicular to the motion — matches the wall-volume body-buffer pattern at
-    /// Npc.cs:1341-1348 so an NPC's torso can't half-clip into a wall while the centerline
-    /// scrapes past it. bodyRadius=0 keeps the thin-ray semantic for LOS checks.
+    /// ±radius perpendicular to the motion. When <paramref name="npcHeight"/> > 0, the test is
+    /// repeated at TWO Z heights (foot Z + 0.1m and foot Z + npcHeight - 0.1m) so low parapets
+    /// AND elevated railings both block — single-Z testing previously let NPCs walk through any
+    /// wall whose mesh sat outside the eye-height band. from.Z is interpreted as the NPC's foot Z.
     /// </summary>
     public bool IsLineBlockedByMesh(string worldName, Vector3 from, Vector3 to,
-        MeshQueryFlags flags = MeshQueryFlags.SkipFoliage, float bodyRadius = 0f)
+        MeshQueryFlags flags = MeshQueryFlags.SkipFoliage, float bodyRadius = 0f, float npcHeight = 0f)
     {
         if (!_loaded) return false;
         if (!_spatialIndex.TryGetValue(worldName, out var index)) return false;
+
+        if (npcHeight > 0f)
+        {
+            // Capsule sampling: low Z catches knee-height walls, high Z catches overhead railings.
+            // A wall mesh spanning [footZ..footZ+ceiling] is hit by at least one sample as long
+            // as ceiling is wider than the two-sample stride.
+            var lowDz = new Vector3(0f, 0f, 0.1f);
+            var highDz = new Vector3(0f, 0f, npcHeight - 0.1f);
+            if (IsLineBlockedAtZ(worldName, from + lowDz, to + lowDz, flags, bodyRadius, index)) return true;
+            if (IsLineBlockedAtZ(worldName, from + highDz, to + highDz, flags, bodyRadius, index)) return true;
+            return false;
+        }
+
+        return IsLineBlockedAtZ(worldName, from, to, flags, bodyRadius, index);
+    }
+
+    private bool IsLineBlockedAtZ(string worldName, Vector3 from, Vector3 to,
+        MeshQueryFlags flags, float bodyRadius,
+        Dictionary<(int RX, int RY), List<CollisionMeshInstance>> index)
+    {
 
         // Broad phase: widen by bodyRadius so neighbour-cell instances grazed by the offset rays are included.
         var minRx = (int)MathF.Floor((MathF.Min(from.X, to.X) - bodyRadius) / RegionSize);

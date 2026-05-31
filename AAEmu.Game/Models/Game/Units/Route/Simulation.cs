@@ -392,6 +392,39 @@ public class Simulation : Patrol
             var (newX, newY, newZ) = PositionAndRotation.AddDistanceToFront(travelDist, targetDist, npc.Transform.Local.Position, target);
 
             newZ = WorldManager.Instance.GetReferenceHeight(npc.Ai, newX, newY, newZ, npc.Transform.ZoneId);
+
+            // Phase 5 — patrol bypass fix. Before Phase 5 this method called SetPosition with
+            // zero wall checks, so any FollowPathBehavior NPC walked straight through every
+            // building on its route. Mirror MoveTowards' wall + body-buffer gate. If blocked,
+            // stay put and let the next tick re-evaluate (RepeatMove still schedules the next
+            // step; we just don't commit the current one).
+            var posX = npc.Transform.Local.Position.X;
+            var posY = npc.Transform.Local.Position.Y;
+            var posZ = npc.Transform.Local.Position.Z;
+            var cvWorldName = CollisionVolumeManager.GetWorldNameFromId(
+                WorldManager.Instance.GetWorldIdByZoneKey(npc.Transform.ZoneId));
+            var patrolBlocked = CollisionVolumeManager.Instance.IsBlockedByWall(
+                cvWorldName, posX, posY, newX, newY, posZ);
+            if (!patrolBlocked)
+            {
+                const float bodyBuf = 0.3f;
+                var mdx = newX - posX;
+                var mdy = newY - posY;
+                var mlen = MathF.Sqrt(mdx * mdx + mdy * mdy);
+                if (mlen > 1e-4f)
+                {
+                    var px = -mdy / mlen * bodyBuf;
+                    var py = mdx / mlen * bodyBuf;
+                    patrolBlocked =
+                        CollisionVolumeManager.Instance.IsBlockedByWall(
+                            cvWorldName, posX + px, posY + py, newX + px, newY + py, posZ) ||
+                        CollisionVolumeManager.Instance.IsBlockedByWall(
+                            cvWorldName, posX - px, posY - py, newX - px, newY - py, posZ);
+                }
+            }
+            if (patrolBlocked)
+                return;
+
             npc.Transform.Local.SetPosition(newX, newY, newZ);
 
             var angle = MathUtil.CalculateAngleFrom(npc.Transform.Local.Position, target);
