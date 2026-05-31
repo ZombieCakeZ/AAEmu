@@ -372,24 +372,43 @@ public class MeshCollisionManager : Singleton<MeshCollisionManager>, ILoadable
 
     /// <summary>
     /// Returns true if the segment from→to is blocked by any loaded mesh triangle in this world.
-    /// Walks the 64m region grid along the segment XY footprint + the large-instance overlay, then
-    /// per instance either traverses the BVH (when the editor populated it) or scans all triangles.
+    /// When <paramref name="bodyRadius"/> > 0, also runs two parallel offset segments at
+    /// ±radius perpendicular to the motion — matches the wall-volume body-buffer pattern at
+    /// Npc.cs:1341-1348 so an NPC's torso can't half-clip into a wall while the centerline
+    /// scrapes past it. bodyRadius=0 keeps the thin-ray semantic for LOS checks.
     /// </summary>
-    public bool IsLineBlockedByMesh(string worldName, Vector3 from, Vector3 to, MeshQueryFlags flags = MeshQueryFlags.SkipFoliage)
+    public bool IsLineBlockedByMesh(string worldName, Vector3 from, Vector3 to,
+        MeshQueryFlags flags = MeshQueryFlags.SkipFoliage, float bodyRadius = 0f)
     {
         if (!_loaded) return false;
         if (!_spatialIndex.TryGetValue(worldName, out var index)) return false;
 
-        var minRx = (int)MathF.Floor(MathF.Min(from.X, to.X) / RegionSize);
-        var maxRx = (int)MathF.Floor(MathF.Max(from.X, to.X) / RegionSize);
-        var minRy = (int)MathF.Floor(MathF.Min(from.Y, to.Y) / RegionSize);
-        var maxRy = (int)MathF.Floor(MathF.Max(from.Y, to.Y) / RegionSize);
-        var segMinX = MathF.Min(from.X, to.X);
-        var segMaxX = MathF.Max(from.X, to.X);
-        var segMinY = MathF.Min(from.Y, to.Y);
-        var segMaxY = MathF.Max(from.Y, to.Y);
+        // Broad phase: widen by bodyRadius so neighbour-cell instances grazed by the offset rays are included.
+        var minRx = (int)MathF.Floor((MathF.Min(from.X, to.X) - bodyRadius) / RegionSize);
+        var maxRx = (int)MathF.Floor((MathF.Max(from.X, to.X) + bodyRadius) / RegionSize);
+        var minRy = (int)MathF.Floor((MathF.Min(from.Y, to.Y) - bodyRadius) / RegionSize);
+        var maxRy = (int)MathF.Floor((MathF.Max(from.Y, to.Y) + bodyRadius) / RegionSize);
+        var segMinX = MathF.Min(from.X, to.X) - bodyRadius;
+        var segMaxX = MathF.Max(from.X, to.X) + bodyRadius;
+        var segMinY = MathF.Min(from.Y, to.Y) - bodyRadius;
+        var segMaxY = MathF.Max(from.Y, to.Y) + bodyRadius;
         var segMinZ = MathF.Min(from.Z, to.Z);
         var segMaxZ = MathF.Max(from.Z, to.Z);
+
+        // Compute perpendicular offset once. Rotate move direction 90° CCW, scale by radius.
+        var perpX = 0f;
+        var perpY = 0f;
+        if (bodyRadius > 0f)
+        {
+            var dx = to.X - from.X;
+            var dy = to.Y - from.Y;
+            var len = MathF.Sqrt(dx * dx + dy * dy);
+            if (len > 1e-4f)
+            {
+                perpX = -dy / len * bodyRadius;
+                perpY = dx / len * bodyRadius;
+            }
+        }
 
         // Dedup instances that straddle multiple region cells.
         var seen = new HashSet<CollisionMeshInstance>();
@@ -403,7 +422,7 @@ public class MeshCollisionManager : Singleton<MeshCollisionManager>, ILoadable
                 {
                     if (!seen.Add(inst)) continue;
                     if (RejectByWorldBounds(inst, segMinX, segMinY, segMaxX, segMaxY, segMinZ, segMaxZ)) continue;
-                    if (InstanceBlocksSegment(inst, from, to, flags)) return true;
+                    if (InstanceBlocksAnyParallel(inst, from, to, flags, perpX, perpY)) return true;
                 }
             }
         }
@@ -414,39 +433,150 @@ public class MeshCollisionManager : Singleton<MeshCollisionManager>, ILoadable
             {
                 if (!seen.Add(inst)) continue;
                 if (RejectByWorldBounds(inst, segMinX, segMinY, segMaxX, segMaxY, segMinZ, segMaxZ)) continue;
-                if (InstanceBlocksSegment(inst, from, to, flags)) return true;
+                if (InstanceBlocksAnyParallel(inst, from, to, flags, perpX, perpY)) return true;
             }
         }
 
         return false;
     }
 
+    private static bool InstanceBlocksAnyParallel(CollisionMeshInstance inst, Vector3 from, Vector3 to,
+        MeshQueryFlags flags, float perpX, float perpY)
+    {
+        if (InstanceBlocksSegment(inst, from, to, flags)) return true;
+        if (perpX == 0f && perpY == 0f) return false;
+        var off = new Vector3(perpX, perpY, 0f);
+        if (InstanceBlocksSegment(inst, from + off, to + off, flags)) return true;
+        if (InstanceBlocksSegment(inst, from - off, to - off, flags)) return true;
+        return false;
+    }
+
     /// <summary>
-    /// Highest mesh-surface Z at (x,y) within ±verticalSearch of probeZ in worldName, or null
-    /// when no mesh surface intersects the search slab. Used by GetReferenceHeight so NPCs
-    /// can stand on rooftops/bridges that have no hand-authored floor volume.
+    /// Mesh surface Z at (x,y) closest to <paramref name="probeZ"/> inside the asymmetric slab
+    /// [probeZ - maxBelow, probeZ + maxAbove]. Mirrors CollisionVolumeManager.GetGridHeight's
+    /// NEAREST-Z disambiguation (CollisionVolumeManager.cs:1816-1832), so on a 2-story building
+    /// an NPC at Z=100.5 finds the ground floor (Z=100) instead of teleporting up to the upper
+    /// floor (Z=104) — the previous MAX-Z bias was the root of the "90° wall climbing" bug.
+    ///
+    /// maxAbove defaults small (1.5m): NPC almost never wants to snap up through a ceiling but
+    /// 1.5m headroom lets him stand on the surface he's just touched. maxBelow is generous
+    /// (6m) because integration drift / animation root-motion routinely puts NPCs a couple
+    /// meters above their actual standing surface.
     /// </summary>
-    public float? QueryFloorHeight(string worldName, float x, float y, float probeZ, float verticalSearch = 6f)
+    public float? QueryNearestFloorHeight(string worldName, float x, float y, float probeZ,
+        float maxAbove = 1.5f, float maxBelow = 6f)
     {
         if (!_loaded) return null;
         if (!_spatialIndex.TryGetValue(worldName, out var index)) return null;
 
         var rx = (int)MathF.Floor(x / RegionSize);
         var ry = (int)MathF.Floor(y / RegionSize);
-        var slabMin = probeZ - verticalSearch;
-        var slabMax = probeZ + verticalSearch;
+        var slabMin = probeZ - maxBelow;
+        var slabMax = probeZ + maxAbove;
 
-        // Downward ray from (x,y, slabMax) length 2*verticalSearch.
-        var origin = new Vector3(x, y, slabMax);
+        float? best = null;
+        var bestDist = float.MaxValue;
+
+        if (index.TryGetValue((rx, ry), out var bucket))
+            CollectNearestHitsInBucket(bucket, x, y, probeZ, slabMin, slabMax, ref best, ref bestDist);
+        if (_largeInstances.TryGetValue(worldName, out var overlay))
+            CollectNearestHitsInBucket(overlay, x, y, probeZ, slabMin, slabMax, ref best, ref bestDist);
+
+        return best;
+    }
+
+    /// <summary>
+    /// Gravity / "where would I land" semantic: highest mesh surface Z at (x,y) that lies
+    /// AT OR BELOW <paramref name="probeZ"/>, within <paramref name="maxDrop"/> meters. Used
+    /// after a knockback/launch when the NPC's resolved Z is far above ground and we want to
+    /// snap to whatever's actually under his feet — bridge, rooftop, terrain stand-in.
+    /// </summary>
+    public float? GetClosestFloorBelow(string worldName, float x, float y, float probeZ, float maxDrop = 50f)
+    {
+        if (!_loaded) return null;
+        if (!_spatialIndex.TryGetValue(worldName, out var index)) return null;
+
+        var rx = (int)MathF.Floor(x / RegionSize);
+        var ry = (int)MathF.Floor(y / RegionSize);
+        var floorMin = probeZ - maxDrop;
+        var origin = new Vector3(x, y, probeZ + 0.001f);
         var dir = new Vector3(0f, 0f, -1f);
-        var maxT = slabMax - slabMin; // ray param length
+        var maxT = probeZ + 0.001f - floorMin;
 
         float? best = null;
         if (index.TryGetValue((rx, ry), out var bucket))
-            best = SamplePointInBucket(bucket, origin, dir, x, y, slabMin, slabMax, maxT, best);
+            best = SamplePointDownwardInBucket(bucket, origin, dir, x, y, floorMin, probeZ + 0.001f, maxT, best);
         if (_largeInstances.TryGetValue(worldName, out var overlay))
-            best = SamplePointInBucket(overlay, origin, dir, x, y, slabMin, slabMax, maxT, best);
+            best = SamplePointDownwardInBucket(overlay, origin, dir, x, y, floorMin, probeZ + 0.001f, maxT, best);
+        return best;
+    }
 
+    private static void CollectNearestHitsInBucket(IReadOnlyList<CollisionMeshInstance> bucket,
+        float x, float y, float probeZ, float slabMin, float slabMax,
+        ref float? best, ref float bestDist)
+    {
+        foreach (var inst in bucket)
+        {
+            if (inst.WorldMaxZ < slabMin || inst.WorldMinZ > slabMax) continue;
+            var (mnx, mny, mxx, mxy) = inst.WorldBounds;
+            if (x < mnx || x > mxx || y < mny || y > mxy) continue;
+
+            CollectInstanceNearestHits(inst, x, y, probeZ, slabMin, slabMax, ref best, ref bestDist);
+        }
+    }
+
+    /// <summary>
+    /// Walk every triangle of the instance, keep the hit Z minimising |hitZ - probeZ| within the slab.
+    /// Linear over triangles (BVH first-hit short-circuit would give us only the highest or lowest
+    /// hit, not the nearest-to-probeZ). Per-instance broad-phase already rejected most candidates.
+    /// </summary>
+    private static void CollectInstanceNearestHits(CollisionMeshInstance inst,
+        float x, float y, float probeZ, float slabMin, float slabMax,
+        ref float? best, ref float bestDist)
+    {
+        var originLocal = WorldToLocal(inst, new Vector3(x, y, probeZ));
+        var dirLocal = WorldToLocalDir(inst, new Vector3(0f, 0f, -1f));
+        var verts = inst.Mesh.Vertices;
+        var idx = inst.Mesh.Indices;
+        var triCount = idx.Length / 3;
+        for (var t = 0; t < triCount; t++)
+        {
+            var v0 = ReadVertex(verts, idx[t * 3]);
+            var v1 = ReadVertex(verts, idx[t * 3 + 1]);
+            var v2 = ReadVertex(verts, idx[t * 3 + 2]);
+            // tMin/tMax = full range — convert hit param to world Z by walking the inverse transform.
+            if (!RayTriangle(originLocal, dirLocal, v0, v1, v2, float.NegativeInfinity, float.PositiveInfinity, out var tHit))
+                continue;
+            // World hit Z = probeZ + dir.Z * tHit; dir.Z = -1 ⇒ hitZ = probeZ - tHit (works even when Scale != 1
+            // because tHit is in dir-units which we built from the same WorldToLocalDir-inverted axis).
+            var localHitZ = originLocal.Z + dirLocal.Z * tHit;
+            var hitZ = inst.Position.Z + localHitZ * inst.Scale;
+            if (hitZ < slabMin || hitZ > slabMax) continue;
+            var dist = MathF.Abs(hitZ - probeZ);
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                best = hitZ;
+            }
+        }
+    }
+
+    private static float? SamplePointDownwardInBucket(IReadOnlyList<CollisionMeshInstance> bucket,
+        Vector3 origin, Vector3 dir, float x, float y, float slabMin, float slabMax, float maxT, float? best)
+    {
+        foreach (var inst in bucket)
+        {
+            if (inst.WorldMaxZ < slabMin || inst.WorldMinZ > slabMax) continue;
+            var (mnx, mny, mxx, mxy) = inst.WorldBounds;
+            if (x < mnx || x > mxx || y < mny || y > mxy) continue;
+
+            var hitT = FirstRayHit(inst, origin, dir, 0f, maxT, MeshQueryFlags.None);
+            if (!hitT.HasValue) continue;
+
+            var hitZ = origin.Z + dir.Z * hitT.Value;
+            if (hitZ < slabMin || hitZ > slabMax) continue;
+            if (!best.HasValue || hitZ > best.Value) best = hitZ;
+        }
         return best;
     }
 

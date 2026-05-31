@@ -917,13 +917,17 @@ public class WorldManager(
                 return activeGrid.Value;
         }
 
-        // 3b-mesh. Phase 3 — sample loaded collision meshes (rooftops / bridges / ship decks)
-        // BEFORE the generic /cv floor lookup. CGF geometry is more precise than hand-authored
-        // volumes, but still loses to explicit bindings (3a) and grid-bound NPCs (3b) above.
+        // 3b-mesh. Phase 4 — sample loaded collision meshes with NEAREST-Z disambiguation, mirroring
+        // CollisionVolumeManager.GetGridHeight (CollisionVolumeManager.cs:1816). Asymmetric slab:
+        // small maxAbove (1.5m headroom — never snap up through a ceiling) + generous maxBelow
+        // (6m — NPC integration drift). The previous MAX-Z bias was the root cause of the
+        // "NPCs climb walls 90°" bug: an NPC at ground floor with footprint touching a 2-story
+        // building's XY would return the roof Z and teleport up.
         if (AppConfiguration.Instance.World.UseMeshFloorHeight && AppConfiguration.Instance.World.UseMeshLineOfSight)
         {
             var npcZ = ai.Owner.Transform.Local.Position.Z;
-            var meshFloor = MeshCollisionManager.Instance.QueryFloorHeight(worldName, x, y, npcZ, 6.0f);
+            var meshFloor = MeshCollisionManager.Instance.QueryNearestFloorHeight(
+                worldName, x, y, npcZ, maxAbove: 1.5f, maxBelow: 6.0f);
             if (meshFloor.HasValue)
                 return meshFloor.Value;
         }

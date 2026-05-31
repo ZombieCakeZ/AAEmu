@@ -456,7 +456,9 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
     {
         // Phase 3 — mesh fallthrough (no-op when flag off). Runs BEFORE the volume spatial-index
         // guard so mesh blocking works in worlds that have no /cv wall volumes at all. Eye height
-        // at z+1m approximates NPC chest height so a 1m wall blocks LOS like the polygon test.
+        // at z+1m approximates NPC chest height; bodyRadius 0.45m matches the MoveTowards body-buf
+        // (0.3m offset on each side, plus 0.15m margin for wall thickness) — fixes Phase-3 NPCs
+        // half-clipping into walls because the thin centerline test missed their torso.
         if (AppConfiguration.Instance.World.UseMeshLineOfSight)
         {
             var meshFlags = AppConfiguration.Instance.World.MeshLosSkipFoliage
@@ -466,7 +468,8 @@ public class CollisionVolumeManager : Singleton<CollisionVolumeManager>, ILoadab
                     worldName,
                     new Vector3(fromX, fromY, z + 1.0f),
                     new Vector3(toX, toY, z + 1.0f),
-                    meshFlags))
+                    meshFlags,
+                    bodyRadius: 0.45f))
                 return true;
         }
 

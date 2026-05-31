@@ -149,7 +149,8 @@ public class BaseUnit : GameObject, IBaseUnit
                 ? MeshCollisionManager.MeshQueryFlags.SkipFoliage
                 : MeshCollisionManager.MeshQueryFlags.None;
             var worldName = CollisionVolumeManager.GetWorldNameFromId(Transform.WorldId);
-            if (MeshCollisionManager.Instance.IsLineBlockedByMesh(worldName, eyeFrom, eyeTo, skip))
+            // LOS is a thin geometric ray — bodyRadius stays 0 so a 1m doorway is still see-through.
+            if (MeshCollisionManager.Instance.IsLineBlockedByMesh(worldName, eyeFrom, eyeTo, skip, bodyRadius: 0f))
                 return false;
         }
 
