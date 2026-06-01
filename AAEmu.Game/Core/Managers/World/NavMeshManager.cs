@@ -4,6 +4,7 @@ using System.Numerics;
 
 using AAEmu.Commons.IO;
 using AAEmu.Commons.Utils;
+using AAEmu.Game.Models;
 
 using DotRecast.Core;
 using DotRecast.Core.Numerics;
@@ -36,10 +37,28 @@ public class NavMeshManager : Singleton<NavMeshManager>, ILoadable
     private const int VertsPerPoly = 6;
     private const float DefaultAgentRadius = 0.6f;
 
+    // ===== Phase 7 — rate-limit constants ==================================
+    /// <summary>Per-NPC repath cooldown floor — every NavMesh query keyed by ObjId throttles to this rate.</summary>
+    public const double DefaultCooldownMs = 200.0;
+    /// <summary>Global tick window for the server-wide query budget.</summary>
+    private const int GlobalBudgetWindowMs = 50;
+    /// <summary>Max NavMesh queries per <see cref="GlobalBudgetWindowMs"/> window (server-wide).</summary>
+    private const int GlobalBudgetPerWindow = 16;
+    /// <summary>Run dictionary GC every Nth insert.</summary>
+    private const long JanitorEveryN = 1000;
+    /// <summary>Prune cooldown entries older than this.</summary>
+    private const long CooldownEntryMaxAgeMs = 60_000;
+
     private readonly ConcurrentDictionary<string, DtNavMesh> _meshes = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ThreadLocal<DtNavMeshQuery>> _queries = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _loadAttempted = new(StringComparer.OrdinalIgnoreCase);
     private readonly IDtQueryFilter _defaultFilter = new DtQueryDefaultFilter();
+
+    // Phase 7 — Per-NPC cooldown + global query budget.
+    private readonly ConcurrentDictionary<uint, long> _npcCooldownTickMs = new();
+    private long _globalBudgetWindowStartMs;
+    private int _globalBudgetCount;
+    private long _insertCounter;
 
     private string _navMeshRoot = string.Empty;
     private bool _loaded;
@@ -118,6 +137,86 @@ public class NavMeshManager : Singleton<NavMeshManager>, ILoadable
         }
     }
 
+    // ===== Phase 7 — rate-limit gates ========================================
+
+    /// <summary>
+    /// True if the given NPC is allowed to fire a NavMesh query right now. False when the
+    /// per-NPC 200ms cooldown is still active OR the server-wide budget for the current 50ms
+    /// window is exhausted. Always false when the feature is disabled via World.UseNavMesh.
+    /// </summary>
+    public bool CanRepathNow(uint objId, double cooldownMs = DefaultCooldownMs)
+    {
+        if (!AppConfiguration.Instance.World.UseNavMesh) return false;
+        var now = Environment.TickCount64;
+        if (_npcCooldownTickMs.TryGetValue(objId, out var nextOk) && now < nextOk)
+            return false;
+        return CheckGlobalBudget(now);
+    }
+
+    /// <summary>Record a successful query so the NPC's cooldown clamp slides forward.</summary>
+    public void NotePathRequest(uint objId, double cooldownMs = DefaultCooldownMs)
+    {
+        var now = Environment.TickCount64;
+        _npcCooldownTickMs[objId] = now + (long)cooldownMs;
+        if (Interlocked.Increment(ref _insertCounter) % JanitorEveryN == 0)
+            PruneCooldownDictionary(now);
+    }
+
+    /// <summary>
+    /// Thin wrapper over <see cref="FindNearestPoly"/> for spawn-snap and roam-target
+    /// validation. Default extents (2m XY, 4m Y/Z up). Returns false on feature-off or
+    /// budget exhaustion or no poly within extents.
+    /// </summary>
+    public bool TrySnap(string worldName, Vector3 pos, out Vector3 snapped, Vector3? extents = null)
+    {
+        snapped = pos;
+        if (!AppConfiguration.Instance.World.UseNavMesh) return false;
+        if (!CheckGlobalBudget(Environment.TickCount64)) return false;
+        // FindNearestPoly internally uses fixed (2,4,2) extents; we ignore the override for now
+        // since most callers use the default — extending later is a single-line follow-up.
+        _ = extents;
+        return FindNearestPoly(worldName, pos, out snapped, out var polyRef) && polyRef != 0L;
+    }
+
+    /// <summary>
+    /// Cooldown-gated overload of <see cref="FindPath(string,Vector3,Vector3,float)"/>. The
+    /// caller's <paramref name="objId"/> participates in the per-NPC throttle so 50 NPCs in
+    /// a siege can't all repath every tick. Returns an empty list on cooldown / budget /
+    /// disabled / no-path so the caller stays in its existing fallback branch.
+    /// </summary>
+    public List<Vector3> FindPath(string worldName, Vector3 start, Vector3 end, float agentRadius, uint objId)
+    {
+        if (!CanRepathNow(objId)) return new List<Vector3>();
+        var path = FindPath(worldName, start, end, agentRadius);
+        if (path.Count > 0) NotePathRequest(objId);
+        return path;
+    }
+
+    /// <summary>
+    /// Sliding 50ms window, max 16 queries. Atomic via Interlocked. Returns true if the
+    /// current query fits inside the budget.
+    /// </summary>
+    private bool CheckGlobalBudget(long nowMs)
+    {
+        var winStart = Volatile.Read(ref _globalBudgetWindowStartMs);
+        if (nowMs - winStart >= GlobalBudgetWindowMs)
+        {
+            Interlocked.Exchange(ref _globalBudgetWindowStartMs, nowMs);
+            Interlocked.Exchange(ref _globalBudgetCount, 0);
+        }
+        return Interlocked.Increment(ref _globalBudgetCount) <= GlobalBudgetPerWindow;
+    }
+
+    /// <summary>O(N) sweep over the cooldown dictionary — drops entries older than 60s.</summary>
+    private void PruneCooldownDictionary(long nowMs)
+    {
+        foreach (var kv in _npcCooldownTickMs)
+        {
+            if (nowMs - kv.Value > CooldownEntryMaxAgeMs)
+                _npcCooldownTickMs.TryRemove(kv.Key, out _);
+        }
+    }
+
     // ===== Query API =========================================================
 
     /// <summary>Coords swap: AA (Z-up) → Recast (Y-up). Pure projection — no scale.</summary>
@@ -183,6 +282,8 @@ public class NavMeshManager : Singleton<NavMeshManager>, ILoadable
     /// <summary>Cheap connectivity test for AI target acceptance — true if a path exists at all.</summary>
     public bool IsReachable(string worldName, Vector3 a, Vector3 b, float agentRadius = DefaultAgentRadius)
     {
+        if (!AppConfiguration.Instance.World.UseNavMesh) return false;
+        if (!CheckGlobalBudget(Environment.TickCount64)) return false;
         return FindPath(worldName, a, b, agentRadius).Count >= 2;
     }
 
@@ -195,6 +296,8 @@ public class NavMeshManager : Singleton<NavMeshManager>, ILoadable
     public bool CapsuleSweep(string worldName, Vector3 a, Vector3 b, float agentRadius, out Vector3 hit)
     {
         hit = b;
+        if (!AppConfiguration.Instance.World.UseNavMesh) return false;
+        if (!CheckGlobalBudget(Environment.TickCount64)) return false;
         if (!EnsureLoaded(worldName)) return false;
         var query = _queries[worldName].Value!;
         var ext = new RcVec3f(2f, 4f, 2f);

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Numerics;
 using AAEmu.Game.Core.Managers.World;
+using AAEmu.Game.Models;
 using AAEmu.Game.Models.Game.AI.Enums;
 using AAEmu.Game.Models.Game.AI.v2.AiCharacters;
 using AAEmu.Game.Models.Game.AI.v2.Framework;
@@ -60,6 +61,23 @@ public static class AiUtils
                 {
                     continue;
                 }
+            }
+
+            // ── Phase 7: NavMesh roam-candidate poly-validity gate ──
+            // After CV wall + grid checks pass, also require the candidate sit on a navmesh
+            // poly within (2m XY / 4m Z). Without this, an NPC can pick a CV-clear roam
+            // target that is still off-mesh; MoveTowards' CapsuleSweep would then clamp the
+            // step to fraction 0 every tick and the NPC freezes. Falling out of the loop
+            // returns ai.IdlePosition (safe).
+            if (AppConfiguration.Instance.World.UseNavMesh && !string.IsNullOrEmpty(cvWorldName))
+            {
+                if (!NavMeshManager.Instance.TrySnap(cvWorldName, newPosition, out var roamSnap))
+                    continue;
+                var dxy = MathF.Sqrt(
+                    (roamSnap.X - newPosition.X) * (roamSnap.X - newPosition.X) +
+                    (roamSnap.Y - newPosition.Y) * (roamSnap.Y - newPosition.Y));
+                var dz = MathF.Abs(roamSnap.Z - newPosition.Z);
+                if (dxy > 2f || dz > 4f) continue;
             }
 
             return newPosition;

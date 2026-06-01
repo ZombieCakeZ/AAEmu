@@ -1,6 +1,7 @@
 ﻿using AAEmu.Commons.Utils;
 using AAEmu.Game.Core.Managers.UnitManagers;
 using AAEmu.Game.Core.Managers.World;
+using AAEmu.Game.Models;
 using AAEmu.Game.Models.Game.Units.Route;
 using AAEmu.Game.Models.Game.World;
 
@@ -174,6 +175,39 @@ public class NpcSpawnerNpc : Spawner<Npc>
                 if (newZ > 0f && Math.Abs(npcSpawner.Position.Z - newZ) < 1f)
                 {
                     npcSpawner.Position.Z = newZ;
+                }
+            }
+        }
+
+        // ── Phase 7: NavMesh spawn snap ──
+        // Snap spawner coords to nearest walkable poly BEFORE ApplyWorldSpawnPosition so the
+        // AI's HomePosition / IdlePosition (assigned right after from Transform.World.Position)
+        // inherit the snapped values. Hard 5m Δ cap on XY+Z so a navmesh hole inside a building
+        // can NEVER teleport the NPC across an architectural gap.
+        if (AppConfiguration.Instance.World.UseNavMesh)
+        {
+            var spawnWorldName = CollisionVolumeManager.GetWorldNameFromId(npcSpawner.ParentWorld?.Id ?? 0);
+            if (!string.IsNullOrEmpty(spawnWorldName))
+            {
+                var rawSpawn = new System.Numerics.Vector3(
+                    npcSpawner.Position.X, npcSpawner.Position.Y, npcSpawner.Position.Z);
+                if (NavMeshManager.Instance.TrySnap(spawnWorldName, rawSpawn, out var snapped))
+                {
+                    var dxy = MathF.Sqrt(
+                        (snapped.X - rawSpawn.X) * (snapped.X - rawSpawn.X) +
+                        (snapped.Y - rawSpawn.Y) * (snapped.Y - rawSpawn.Y));
+                    var dz = MathF.Abs(snapped.Z - rawSpawn.Z);
+                    if (dxy < 5f && dz < 5f)
+                    {
+                        npcSpawner.Position.X = snapped.X;
+                        npcSpawner.Position.Y = snapped.Y;
+                        npcSpawner.Position.Z = snapped.Z;
+                    }
+                    else
+                    {
+                        Logger.Warn($"NavMesh spawn snap rejected for NPC {MemberId} @ spawner " +
+                                    $"{NpcSpawnerTemplateId}: Δxy={dxy:F2}m Δz={dz:F2}m (>5m cap). Using raw spawner.");
+                    }
                 }
             }
         }

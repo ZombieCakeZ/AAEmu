@@ -1394,6 +1394,41 @@ public partial class Npc : Unit
                     wpZ = curZ + MathF.Sign(zDelta) * maxZStepPerTick;
             }
 
+            // ── Phase 7: NavMesh capsule-sweep slide (waypoint branch) ──
+            // Same invariants as the direct branch — runs after CV wall + body-buffer + grid gates
+            // pass and after the Z safety clamp, just before the actual SetPosition.
+            if (AppConfiguration.Instance.World.UseNavMesh
+                && NavMeshManager.Instance.CanRepathNow(ObjId))
+            {
+                var navWorldNameWp = CollisionVolumeManager.GetWorldNameFromId(
+                    WorldManager.Instance.GetWorldIdByZoneKey(Transform.ZoneId));
+                if (!string.IsNullOrEmpty(navWorldNameWp))
+                {
+                    const float bodyRadius = 0.3f;
+                    var wpCurZ = Transform.Local.Position.Z;
+                    var wpFrom = new Vector3(wpPosX, wpPosY, wpPosZ);
+                    var wpTo = new Vector3(wpNewX, wpNewY, wpZ);
+                    if (NavMeshManager.Instance.CapsuleSweep(navWorldNameWp, wpFrom, wpTo, bodyRadius, out var wpHit))
+                    {
+                        var full = wpTo - wpFrom;
+                        var fullLen2 = full.LengthSquared();
+                        if (fullLen2 > 1e-6f)
+                        {
+                            var hitLen2 = (wpHit - wpFrom).LengthSquared();
+                            var slide = MathF.Sqrt(hitLen2 / fullLen2) * 0.95f;
+                            wpNewX = wpPosX + (wpNewX - wpPosX) * slide;
+                            wpNewY = wpPosY + (wpNewY - wpPosY) * slide;
+                            wpZ = WorldManager.Instance.GetReferenceHeight(
+                                Ai, wpNewX, wpNewY, wpPosZ, Transform.ZoneId);
+                            var zClamp = wpZ - wpCurZ;
+                            if (MathF.Abs(zClamp) > 0.5f)
+                                wpZ = wpCurZ + MathF.Sign(zClamp) * 0.5f;
+                        }
+                    }
+                    NavMeshManager.Instance.NotePathRequest(ObjId);
+                }
+            }
+
             Transform.Local.SetPosition(wpNewX, wpNewY, wpZ);
             other = waypoint; // For angle/velocity calculation below
         }
@@ -1532,6 +1567,43 @@ public partial class Npc : Unit
                 var zDelta = targetPositionZ - currentZ;
                 if (MathF.Abs(zDelta) > maxZStepPerTick)
                     targetPositionZ = currentZ + MathF.Sign(zDelta) * maxZStepPerTick;
+            }
+
+            // ── Phase 7: NavMesh capsule-sweep slide-along-wall ──
+            // Fires AFTER the Phase-5 IsBlockedByWall body-buffer gate + Z safety clamp, so the
+            // step is already known to clear the polygon wall layer. CapsuleSweep clips against
+            // the editor-baked navmesh and slides the move to the hit point × 0.95 along the
+            // motion vector when the path is partially blocked. Gated by World.UseNavMesh and
+            // the per-NPC repath cooldown so a 50-NPC siege can't flood Detour.
+            if (AppConfiguration.Instance.World.UseNavMesh
+                && NavMeshManager.Instance.CanRepathNow(ObjId))
+            {
+                var navWorldName = CollisionVolumeManager.GetWorldNameFromId(
+                    WorldManager.Instance.GetWorldIdByZoneKey(Transform.ZoneId));
+                if (!string.IsNullOrEmpty(navWorldName))
+                {
+                    const float bodyRadius = 0.3f;
+                    var sweepFrom = new Vector3(posX, posY, currentZ);
+                    var sweepTo = new Vector3(newX, newY, targetPositionZ);
+                    if (NavMeshManager.Instance.CapsuleSweep(navWorldName, sweepFrom, sweepTo, bodyRadius, out var navHit))
+                    {
+                        var full = sweepTo - sweepFrom;
+                        var fullLen2 = full.LengthSquared();
+                        if (fullLen2 > 1e-6f)
+                        {
+                            var hitLen2 = (navHit - sweepFrom).LengthSquared();
+                            var slide = MathF.Sqrt(hitLen2 / fullLen2) * 0.95f;
+                            newX = posX + (newX - posX) * slide;
+                            newY = posY + (newY - posY) * slide;
+                            targetPositionZ = WorldManager.Instance.GetReferenceHeight(
+                                Ai, newX, newY, currentZ, Transform.ZoneId);
+                            var zClamp = targetPositionZ - currentZ;
+                            if (MathF.Abs(zClamp) > 0.5f)
+                                targetPositionZ = currentZ + MathF.Sign(zClamp) * 0.5f;
+                        }
+                    }
+                    NavMeshManager.Instance.NotePathRequest(ObjId);
+                }
             }
 
             Transform.Local.SetPosition(newX, newY, targetPositionZ);
