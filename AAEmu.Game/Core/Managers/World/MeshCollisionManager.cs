@@ -349,6 +349,28 @@ public class MeshCollisionManager : Singleton<MeshCollisionManager>, ILoadable
 
     public bool IsLoaded => _loaded;
 
+    /// <summary>
+    /// Phase 8 hook — returns the loaded instance list for a world so PhysicsManager can
+    /// register each as a Jitter DynamicTree proxy. Returns empty when not loaded or unknown world.
+    /// </summary>
+    public IReadOnlyList<CollisionMeshInstance> GetWorldInstances(string worldName)
+    {
+        if (_worldInstances.TryGetValue(worldName, out var list)) return list;
+        return Array.Empty<CollisionMeshInstance>();
+    }
+
+    /// <summary>
+    /// Phase 8 hook — raycast against a single CollisionMeshInstance using the existing
+    /// per-template BVH + Möller-Trumbore. Origin/direction in AA world space, Z-up. Returns
+    /// the parametric hit-t along <paramref name="direction"/> within [0..maxT], or null.
+    /// </summary>
+    public float? RaycastInstance(CollisionMeshInstance inst, Vector3 origin, Vector3 direction, float maxT,
+        MeshQueryFlags flags = MeshQueryFlags.None)
+    {
+        if (inst?.Mesh == null) return null;
+        return FirstRayHit(inst, origin, direction, 0f, maxT, flags);
+    }
+
     // ===== Phase 3 — query API (BVH-accelerated where available) =============
 
     [Flags]

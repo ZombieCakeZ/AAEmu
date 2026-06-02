@@ -24,7 +24,7 @@ using NLog;
 namespace AAEmu.Game.Core.Managers.World;
 
 // ReSharper disable HollowTypeName
-public class PhysicsManager
+public partial class PhysicsManager
 {
     private static Logger Logger { get; } = LogManager.GetCurrentClassLogger();
     /// <summary>
@@ -91,6 +91,11 @@ public class PhysicsManager
             )
         };
         _buoyancy.UseOwnFluidArea(CustomWater);
+
+        // Phase 8a — register every editor-baked doodad collision instance as a static
+        // DynamicTree proxy so Jitter's broadphase + IRayCastable can drive NPC collision
+        // queries instead of our custom BVH. Safe to call here pre-StartPhysics, no lock.
+        LoadStaticDoodadsForWorld(CollisionVolumeManager.GetWorldNameFromId(SimulationWorld.Template.Id));
 
         Logger.Info($"{SimulationWorld.Template.Name} initialized.");
     }
