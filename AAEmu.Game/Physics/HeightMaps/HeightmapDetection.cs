@@ -1,4 +1,6 @@
-﻿using Jitter2.Collision;
+﻿using AAEmu.Game.Core.Managers.World;
+
+using Jitter2.Collision;
 using Jitter2.Collision.Shapes;
 using Jitter2.LinearMath;
 
@@ -22,6 +24,12 @@ public class HeightmapDetection : IBroadPhaseFilter
 
     public bool Filter(IDynamicTreeProxy shapeA, IDynamicTreeProxy shapeB)
     {
+        // Phase 8a — DoodadCollisionProxy entries are raycast-only (PhysicsManager.Raycast
+        // / HeightAt walk DynamicTree.RayCast via IRayCastable, which bypasses this filter).
+        // Body-vs-body narrowphase has no dispatcher for them, so reject any pair touching
+        // a doodad before Jitter throws "Don't know how to handle collision".
+        if (shapeA is DoodadCollisionProxy || shapeB is DoodadCollisionProxy) return false;
+
         if (shapeA != _shape && shapeB != _shape) return true;
 
         var collider = shapeA == _shape ? shapeB : shapeA;
