@@ -33,8 +33,21 @@ public class ImpulseEffect : EffectTemplate
         if (impulseTarget == null || impulseTarget is Unit { IsDead: true })
             return;
 
+        // Source attribution for the impulse packet:
+        //   - Vehicle self-cast (Jump / Charge / Roll, target == caster after slave
+        //     redirect): self-sentinel — Unit type + impulseTarget.ObjId. The driver
+        //     Character that fires the skill isn't the entity the client wants to
+        //     attribute the push to; using the vehicle's own id matches what the
+        //     working build emitted before the protocol field was identified.
+        //   - Cross-target impulse (attacker→victim pull / knockback / lift / dash /
+        //     leap): pass the real casterObj so the client sees the correct attacker.
+        var impulseSource = (caster == impulseTarget)
+            ? new SkillCasterUnit { ObjId = impulseTarget.ObjId }
+            : casterObj;
+
         var packet = new SCUnitImpulsePacket(
             impulseTarget.ObjId,
+            impulseSource,
             VelImpulseX,
             VelImpulseY,
             VelImpulseZ,
