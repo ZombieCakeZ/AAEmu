@@ -66,18 +66,28 @@ public class ImpulseEffect : EffectTemplate
 
     private static BaseUnit ResolveImpulseTarget(BaseUnit caster, BaseUnit target)
     {
+        // Direct slave target — the unit being pushed is already the slave (vehicle).
         if (target is Slave)
             return target;
 
-        if (caster is Slave)
-            return caster;
-
+        // Player on a vehicle triggers a self-cast (target == caster Character): redirect
+        // to the slave so the impulse applies to the vehicle the player is driving rather
+        // than the rider Character.
         if (target == caster && caster is Character character)
         {
             var slave = GetCharacterSlave(character);
             if (slave != null)
                 return slave;
         }
+
+        // Slave self-cast (vehicle skill on itself, e.g. Jump / Super Charge / Roll):
+        // keep the slave as the target. Slave casts targeting a DIFFERENT unit (e.g. a
+        // vehicle skill that knocks back an opposing player) must keep the requested
+        // target — silently redirecting the impulse to the caster slave would land the
+        // push on the vehicle instead of the victim. (Greptile review point on the
+        // original PR — every other branch resolves correctly without this redirect.)
+        if (caster is Slave && target == caster)
+            return caster;
 
         return target;
     }
